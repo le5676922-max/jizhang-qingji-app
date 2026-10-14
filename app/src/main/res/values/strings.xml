@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">轻记</string>
+    <string name="screen_capture_description">识别微信和支付宝已打开的交易结果页，提取金额与收支方向保存到本机账本。不会点击、转账或输入密码。可选本地 OCR 仅识别允许截取的交易结果页面，不保存图片，OCR 和不确定账单需手动确认。可在轻记或系统设置中随时关闭。</string>
+</resources>

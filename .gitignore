@@ -1,0 +1,43 @@
+# Local IDE / Gradle / Android SDK state
+*.iml
+.idea/
+.gradle/
+.kotlin/
+build/
+local.properties
+.externalNativeBuild/
+.cxx/
+.DS_Store
+/captures/
+
+# Device data, raw research artifacts and local verification captures
+/docs/evidence/
+/docs/screenshots/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.qjbackup
+*.checkpoint*
+
+# Installable APKs are published as GitHub Release assets
+/deliverables/*.apk
+*.aab
+
+# Never commit credentials or signing keys
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*
+keystore.properties
+signing.properties
+secrets.properties
+
+# Local agent state
+.agents/
+.codex/
