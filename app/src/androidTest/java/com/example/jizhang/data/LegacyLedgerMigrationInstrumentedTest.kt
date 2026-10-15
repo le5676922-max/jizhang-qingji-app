@@ -38,6 +38,7 @@ class LegacyLedgerMigrationInstrumentedTest {
         legacyTimestamp = System.currentTimeMillis() - 5_000
         seedVersionOne()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
     }
 
     @After
@@ -71,6 +72,7 @@ class LegacyLedgerMigrationInstrumentedTest {
         assertEquals(2, repository.entries.value.size)
         repository.closeForTesting()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         awaitEntries(2)
         assertFalse(repository.add(notification(DELETED_HASH)))
         assertEquals(2, repository.entries.value.size)
@@ -80,19 +82,24 @@ class LegacyLedgerMigrationInstrumentedTest {
     @Test
     fun migratedAutomaticEntriesRequireReviewForMatchingNewCaptureChannels() = runBlocking {
         awaitEntries(2)
-        repository.updateSettings(repository.settings.value.copy(screenEnabled = true))
+        repository.updateSettings(repository.settings.value.copy(screenEnabled = true, autoEnabled=true))
         val screen = requireNotNull(ScreenPaymentParser.parse(
             "com.tencent.mm",
             "转账详情\n转账成功\n转账金额：100.00元\n收款人：张三\n交易单号：TRANSFER20261013MIGRATE",
         ))
         assertEquals(ScreenSaveResult.NEEDS_REVIEW,
             repository.addScreenPayment(screen, System.currentTimeMillis()))
-        assertTrue(repository.addNotification(notification("c".repeat(64)), emptyList()))
+        assertTrue(repository.addNotification(notification("c".repeat(64)).copy(occurredAt=System.currentTimeMillis()), emptyList()))
         val entries = repository.entries.value
-        assertEquals(4, entries.size)
-        assertEquals(2, entries.count { it.needsReview })
+        // V2 review evidence is separate; the two preserved legacy entries are untouched.
+        assertEquals(2, entries.size)
+        assertEquals(0, entries.count { it.needsReview })
         assertFalse(entries.single { it.fingerprint == AUTO_HASH }.needsReview)
-        assertTrue(entries.single { it.fingerprint == "c".repeat(64) }.needsReview)
+        val reviewEvents=repository.recognitionEvents.value.filter {
+            it.decision==com.example.jizhang.recognition.RecognitionDecision.REVIEW }
+        assertEquals(2,reviewEvents.size)
+        assertTrue(reviewEvents.any { it.candidate.eventFingerprint=="c".repeat(64) })
+        assertTrue(reviewEvents.all { it.linkedEntryId==null })
         assertEquals(10_000L, entries.filter { it.type == EntryType.EXPENSE && !it.needsReview }.sumOf { it.amountCents })
     }
 

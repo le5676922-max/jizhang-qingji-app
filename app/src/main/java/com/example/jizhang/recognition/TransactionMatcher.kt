@@ -13,6 +13,7 @@ data class MatcherEventSnapshot(
     val orderIdentity: String? = null,
     val linkedEntryId: Long? = null,
     val userIgnored: Boolean = false,
+    val originalOrderIdentity: String? = null,
 )
 
 data class MatcherEntrySnapshot(val entry: LedgerEntry, val deleted: Boolean = false)
@@ -36,6 +37,7 @@ object TransactionMatcher {
         orderIdentity: String?,
         events: List<MatcherEventSnapshot>,
         entries: List<MatcherEntrySnapshot>,
+        originalOrderIdentity: String? = null,
     ): TransactionMatchResult {
         val byId = entries.associateBy { it.entry.id }
         val hasOrder = orderIdentity != null && digest.matches(orderIdentity) &&
@@ -49,14 +51,14 @@ object TransactionMatcher {
         var conflict = orderIdentity != null && !digest.matches(orderIdentity)
         if (conflict) reasons.add("订单身份格式不合法，需要人工核对")
         val ignored = sameOrder.any { it.userIgnored && it.candidate.hasStableIdentity &&
-            sameBusinessScope(candidate, it.candidate) }
+            sameBusinessScope(candidate, it.candidate) && !refundOriginalConflict(candidate, originalOrderIdentity, it) }
         if (ignored && trusted) return TransactionMatchResult(userIgnoredOrderSuppressed = true,
             reasons = listOf("同一稳定订单已被人工忽略，不会自动重新入账"))
         if (ignored) reasons.add("识别单号对应人工忽略记录，只提供人工核对")
 
         val matchedIds = sameOrder.mapNotNull { it.linkedEntryId }.distinct()
         val deleted = sameOrder.any { event -> event.linkedEntryId?.let { byId[it]?.deleted } == true &&
-            sameBusinessScope(candidate, event.candidate) }
+            sameBusinessScope(candidate, event.candidate) && !refundOriginalConflict(candidate, originalOrderIdentity, event) }
         if (deleted && trusted) {
             // A tombstone wins even after the user edited its amount: the same stable
             // order must not create a replacement ledger just because its facts changed.
@@ -70,7 +72,7 @@ object TransactionMatcher {
         sameOrder.forEach { event ->
             // An original expense and its refund can share numeric IDs. A wrong own-order
             // role is a conflict; originalOrderId is deliberately never read by this matcher.
-            if (knownFactsConflict(candidate, event.candidate)) {
+            if (knownFactsConflict(candidate, event.candidate) || refundOriginalConflict(candidate, originalOrderIdentity, event)) {
                 conflict = true
                 event.linkedEntryId?.takeIf { byId[it]?.deleted == false }?.let(suggestions::add)
                 return@forEach
@@ -134,6 +136,10 @@ object TransactionMatcher {
             first.businessType == second.businessType) &&
             (first.direction == FundsDirection.UNKNOWN || second.direction == FundsDirection.UNKNOWN ||
                 first.direction == second.direction)
+
+    private fun refundOriginalConflict(candidate: TransactionCandidate, originalIdentity: String?, event: MatcherEventSnapshot): Boolean =
+        candidate.businessType == BusinessType.REFUND && originalIdentity != null && event.originalOrderIdentity != null &&
+            (originalIdentity != event.originalOrderIdentity || candidate.originalOrderNamespace != event.candidate.originalOrderNamespace)
 
     private fun canonicalAgrees(candidate: TransactionCandidate, entry: LedgerEntry): Boolean =
         candidate.amountCents == entry.amountCents && candidate.businessType == entry.businessType &&

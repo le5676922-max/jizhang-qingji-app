@@ -128,6 +128,34 @@ class BackupStorageInstrumentedTest {
         assertFalse(db.inTransaction())
     }
 
+    @Test
+    fun normalSnapshotResetsPoisonedAllocatorAndAllowsNewRowsInEveryAutoincrementTable() {
+        val source = database().apply { seedComplete(this) }
+        val validated = BackupDocumentValidator.validate(BackupStorage.exportSnapshot(source, settings))
+        val target = database().apply { seedSentinel(this) }
+        // Model an old/abnormal allocator without placing impossible IDs in the restored document.
+        listOf("entries", "source_events", "link_actions").forEach { table ->
+            target.delete("sqlite_sequence", "name = ?", arrayOf(table))
+            target.insertOrThrow("sqlite_sequence", null, ContentValues().apply {
+                put("name", table); put("seq", Long.MAX_VALUE)
+            })
+        }
+
+        BackupStorage.restoreSnapshot(target, validated)
+
+        val nextEntry = fixtureValues(entry(21, 500)).apply { remove("id") }
+        assertEquals(21L, target.insertOrThrow("entries", null, nextEntry))
+        assertEquals(33L, target.insertOrThrow("source_events", null,
+            fixtureValues(event(33, HASH_F).put("decision", "IGNORE")).apply { remove("id") }))
+        insert(target, "seen_events", JSONObject().put("fingerprint", HASH_F).put("observed_at", NOW))
+        insert(target, "event_aliases", JSONObject().put("fingerprint", HASH_F).put("event_id", 33))
+        val action = ContentValues().apply { put("event_id", 33); put("action", "IGNORE"); put("occurred_at", NOW) }
+        assertEquals(7L, target.insertOrThrow("link_actions", null, action))
+        assertEquals(3, BackupDocumentValidator.validate(BackupStorage.exportSnapshot(target, settings)).eventCount)
+        assertEquals(1L, scalar(target, "PRAGMA foreign_keys"))
+        assertFalse(target.inTransaction())
+    }
+
     private fun database(): SQLiteDatabase {
         val name = "backup-storage-test-${UUID.randomUUID()}.db"
         val helper = object : SQLiteOpenHelper(context, name, null, 3) {
@@ -206,6 +234,10 @@ class BackupStorageInstrumentedTest {
         .put("related_entry_id", JSONObject.NULL).put("association", "NONE")
 
     private fun insert(db: SQLiteDatabase, table: String, row: JSONObject) {
+        db.insertOrThrow(table, null, fixtureValues(row))
+    }
+
+    private fun fixtureValues(row: JSONObject): ContentValues {
         val values = ContentValues()
         row.keys().forEach { column ->
             when (val value = row.get(column)) {
@@ -215,7 +247,7 @@ class BackupStorageInstrumentedTest {
                 else -> error("Unsupported fixture value")
             }
         }
-        db.insertOrThrow(table, null, values)
+        return values
     }
 
     private fun table(document: JSONObject, name: String): JSONArray = document.getJSONObject("tables").getJSONArray(name)

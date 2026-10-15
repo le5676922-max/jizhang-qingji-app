@@ -150,6 +150,55 @@ class BackupDocumentValidatorInstrumentedTest {
     }
 
     @Test
+    fun manuallyConfirmedRefundKeepsUnknownRawEvidenceAndMatchingOriginalAssociation() {
+        val document = fixture()
+        table(document, "entries").put(refund(2, 1_000, 1))
+        table(document, "source_events").getJSONObject(0).put("business_type", "UNKNOWN")
+            .put("direction", "UNKNOWN").put("amount_cents", 1_000).put("linked_entry_id", 2)
+            .put("related_entry_id", 1).put("association", "CONFIRMED")
+        val result = BackupDocumentValidator.validate(bytes(document))
+        assertEquals(2, result.entryCount)
+        assertEquals("UNKNOWN", table(result.document, "source_events").getJSONObject(0).getString("business_type"))
+        assertEquals("REFUND", table(result.document, "entries").getJSONObject(1).getString("business_type"))
+    }
+
+    @Test
+    fun unknownRawEvidenceCannotInventAnOriginalDifferentFromItsCanonicalRefund() {
+        val mismatched = fixture()
+        table(mismatched, "entries").put(refund(2, 1_000, 1)).put(entry(3, 10_000))
+        table(mismatched, "source_events").getJSONObject(0).put("business_type", "UNKNOWN")
+            .put("linked_entry_id", 2).put("related_entry_id", 3)
+        expectInvalid(mismatched)
+        expectInvalid(fixture().apply {
+            table(this, "source_events").getJSONObject(0).put("business_type", "UNKNOWN").put("related_entry_id", 1)
+        })
+    }
+
+    @Test
+    fun consistentIdentifiersAtTheBoundAreAllowedButAllocatorCeilingIdsAreRejected() {
+        val boundary = fixture()
+        table(boundary, "entries").getJSONObject(0).put("id", BackupDocumentValidator.MAX_IDENTIFIER_ID)
+        table(boundary, "source_events").getJSONObject(0).put("linked_entry_id", BackupDocumentValidator.MAX_IDENTIFIER_ID)
+        table(boundary, "link_actions").getJSONObject(0).put("to_entry_id", BackupDocumentValidator.MAX_IDENTIFIER_ID)
+        assertEquals(1, BackupDocumentValidator.validate(bytes(boundary)).entryCount)
+        val oversized = BackupDocumentValidator.MAX_IDENTIFIER_ID + 1
+        listOf(oversized, Long.MAX_VALUE).forEach { invalidId ->
+            val document = copy(boundary)
+            table(document, "entries").getJSONObject(0).put("id", invalidId)
+            table(document, "source_events").getJSONObject(0).put("linked_entry_id", invalidId)
+            table(document, "link_actions").getJSONObject(0).put("to_entry_id", invalidId)
+            expectInvalid(document)
+        }
+        val oversizedEvent = fixture()
+        table(oversizedEvent, "source_events").getJSONObject(0).put("id", oversized)
+        table(oversizedEvent, "event_aliases").getJSONObject(0).put("event_id", oversized)
+        table(oversizedEvent, "link_actions").getJSONObject(0).put("event_id", oversized)
+        expectInvalid(oversizedEvent)
+        expectInvalid(fixture().apply { table(this, "link_actions").getJSONObject(0).put("id", oversized) })
+        expectInvalid(fixture().apply { table(this, "link_actions").getJSONObject(0).put("to_entry_id", 0) })
+    }
+
+    @Test
     fun invalidEncodingDeepInputOversizeAndTrailingDocumentsFailWithoutLeakingContent() {
         expectInvalidBytes(byteArrayOf(0xC3.toByte(), 0x28))
         expectInvalidBytes(("[".repeat(64) + "0" + "]".repeat(64)).toByteArray())

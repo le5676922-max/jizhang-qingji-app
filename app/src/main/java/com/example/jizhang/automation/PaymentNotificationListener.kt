@@ -61,7 +61,9 @@ class PaymentNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val notification = sbn?.notification ?: return
         if (sbn.packageName !in SUPPORTED_PACKAGES) return
+        if(repository.restoreBlocked.value) return
         if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+        val settingsGeneration=repository.recognitionConfigurationGeneration()
         val settings = repository.settings.value
         if (!settings.autoEnabled ||
             (sbn.packageName == WECHAT_PACKAGE && !settings.wechatEnabled) ||
@@ -69,17 +71,22 @@ class PaymentNotificationListener : NotificationListenerService() {
         ) return
         if (sbn.postTime < maxOf(connectedSince, repository.automationEnabledSince())) return
         val extras = notification.extras ?: return
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-        if(title.length>512 || !PaymentNotificationParser.isServiceTitle(sbn.packageName,title)) return
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
+        val rawTitle = extras.getCharSequence(Notification.EXTRA_TITLE) ?: return
+        if(rawTitle.length>512) return
+        val title = rawTitle.toString().trim()
+        if(!PaymentNotificationParser.isServiceTitle(sbn.packageName,title)) return
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
+        if ((text?.length ?: 0)>8192 || (bigText?.length ?: 0)>8192) return
         val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-            ?.map { it.toString().trim() }?.filter { it.isNotBlank() }.orEmpty()
         // A multi-message inbox can contain several transactions, so do not guess one amount from it.
-        if (lines.size > 1 && bigText.isBlank() && text.isBlank()) return
-        val body = bigText.ifBlank { text.ifBlank { lines.singleOrNull().orEmpty() } }
-        if (title.length > 512 || body.isBlank() || body.length > 8_192) return
-        val snapshot = Snapshot(sbn.packageName, sbn.key, sbn.postTime, notification.`when`, title, body, connectionGeneration)
+        if ((lines?.size ?: 0)>1 && bigText.isNullOrBlank() && text.isNullOrBlank()) return
+        val rawBody = if(!bigText.isNullOrBlank()) bigText else if(!text.isNullOrBlank()) text
+            else lines?.singleOrNull() ?: return
+        if(rawBody.length>8192 || rawBody.isBlank()) return
+        val body=rawBody.toString().trim()
+        val snapshot = Snapshot(sbn.packageName, sbn.key, sbn.postTime, notification.`when`, title, body,
+            connectionGeneration,settingsGeneration)
         if (!events.trySend(snapshot).isSuccess) {
             repository.reportCaptureError("通知过于频繁，部分通知未能处理，请核对并手动补录。")
         }
@@ -88,6 +95,7 @@ class PaymentNotificationListener : NotificationListenerService() {
     private suspend fun capture(snapshot: Snapshot) {
         val settings = repository.settings.value
         if (!settings.autoEnabled || snapshot.generation!=connectionGeneration ||
+            snapshot.configurationGeneration!=repository.recognitionConfigurationGeneration() ||
             snapshot.postTime < maxOf(connectedSince, repository.automationEnabledSince()) ||
             (snapshot.packageName == WECHAT_PACKAGE && !settings.wechatEnabled) ||
             (snapshot.packageName == ALIPAY_PACKAGE && !settings.alipayEnabled)
@@ -103,7 +111,8 @@ class PaymentNotificationListener : NotificationListenerService() {
         )
         val candidate=CandidateFactory.fromNotification(snapshot.packageName,snapshot.title,snapshot.text,
             identity.primary,listOfNotNull(identity.stableTransaction),snapshot.postTime) ?: return
-        val saved=repository.ingest(candidate) { snapshot.generation==connectionGeneration && connectedSince!=Long.MAX_VALUE }
+        val saved=repository.ingest(candidate) { snapshot.generation==connectionGeneration && connectedSince!=Long.MAX_VALUE &&
+            snapshot.configurationGeneration==repository.recognitionConfigurationGeneration() }
         if(!saved.disabled) repository.reportRecognitionDiagnostic(EvidenceType.NOTIFICATION,
             if(saved.decision==RecognitionDecision.IGNORE) "通知候选未通过账务验证" else "通知交易候选已通过解析",
             saved.decision!=RecognitionDecision.IGNORE,(System.nanoTime()-started)/1_000_000)
@@ -126,6 +135,7 @@ class PaymentNotificationListener : NotificationListenerService() {
         val title: String,
         val text: String,
         val generation: Long,
+        val configurationGeneration: Long,
     )
 
     companion object {

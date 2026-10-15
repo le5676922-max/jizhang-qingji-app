@@ -1,6 +1,7 @@
 package com.example.jizhang.automation
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.KeyguardManager
 import android.content.Intent
 import android.graphics.Bitmap
@@ -20,12 +21,19 @@ import com.example.jizhang.domain.ScreenPaymentParser
 import com.example.jizhang.recognition.CandidateFactory
 import com.example.jizhang.recognition.EvidenceType
 import com.example.jizhang.recognition.RecognitionDecision
+import com.example.jizhang.recognition.ocr.OcrReceiptLayoutParser
+import com.example.jizhang.recognition.ocr.OcrDocument
+import com.example.jizhang.recognition.ocr.OcrLine
+import com.example.jizhang.recognition.ocr.OcrRect
+import java.util.concurrent.Executors
 import java.util.ArrayDeque
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -54,7 +62,7 @@ class ScreenCaptureService : AccessibilityService() {
     private lateinit var repository: LedgerRepository
     // Main-thread accessibility callbacks replace the whole tuple. The IO collector must
     // never combine a previous Activity with a later package/window/session.
-    @Volatile private var foregroundFrame = ForegroundFrame()
+    @Volatile private var foregroundFrame = ForegroundEpoch()
     private var lastOcrAt = -ScreenCapturePolicy.OCR_INTERVAL_MS
     private var lastSavedReceiptKey: String? = null
     private var lastSavedSession = -1L
@@ -66,6 +74,17 @@ class ScreenCaptureService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         repository = LedgerRepository.get(applicationContext)
+        scope.launch {
+            repository.restoreBlocked.collect { blocked ->
+                if(blocked) {
+                    invalidateForegroundEpoch()
+                    cancelOcrRetry()
+                    while(events.tryReceive().isSuccess) { /* discard revoked observations */ }
+                    publish("账本准备或恢复期间已暂停屏幕读取")
+                } else publish(if(!repository.settings.value.screenEnabled) "屏幕识别已关闭"
+                    else if(mutableConnectionState.value) "已连接，等待微信或支付宝的付款结果页" else "等待无障碍服务连接")
+            }
+        }
         scope.launch {
             repository.settings.map { it.screenEnabled }.distinctUntilChanged().collect { enabled ->
                 if (!enabled) {
@@ -97,7 +116,7 @@ class ScreenCaptureService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        invalidateForegroundFrame()
+        invalidateForegroundEpoch()
         // XML sets the same allowlist; keep it explicit even after a future settings change.
         serviceInfo = serviceInfo.apply { packageNames = ScreenCapturePolicy.SUPPORTED_PACKAGES.toTypedArray() }
         mutableConnectionState.value = true
@@ -108,9 +127,9 @@ class ScreenCaptureService : AccessibilityService() {
         event ?: return
         if (event.eventType !in OBSERVED_EVENTS) return
         if (!mutableConnectionState.value) return
-        if (!repository.settings.value.screenEnabled) return
+        if (repository.restoreBlocked.value || !repository.settings.value.screenEnabled) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && event.isAccessibilityDataSensitive) {
-            invalidateForegroundFrame(event.eventTime)
+            invalidateForegroundEpoch(event.eventTime)
             cancelOcrRetry()
             publish("支付应用将此页面标记为敏感内容，已跳过识别")
             return
@@ -119,7 +138,7 @@ class ScreenCaptureService : AccessibilityService() {
         if (packageName != null && packageName !in ScreenCapturePolicy.SUPPORTED_PACKAGES) {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                 event.eventTime >= foregroundFrame.lastStateEventTime) {
-                invalidateForegroundFrame(event.eventTime)
+                invalidateForegroundEpoch(event.eventTime)
             }
             return
         }
@@ -146,12 +165,15 @@ class ScreenCaptureService : AccessibilityService() {
         if (stateChange) {
             // A delayed state event from an earlier window must not roll the frame back
             // after a newer Activity has already become the foreground observation.
-            if (event.eventTime < frame.lastStateEventTime) return
+            if (event.eventTime < maxOf(frame.lastStateEventTime,frame.lastContentEventTime)) return
             val newClass = event.className?.toString().orEmpty()
             val changed = observedPackage != frame.packageName || eventWindowId != frame.windowId ||
                 newClass != frame.activityClass
-            frame = ForegroundFrame(observedPackage, newClass, eventWindowId,
-                frame.session + if (changed) 1 else 0, SystemClock.elapsedRealtime(), event.eventTime)
+            frame = ForegroundEpoch(observedPackage, newClass, eventWindowId,
+                frame.session + if (changed) 1 else 0,
+                if(changed) SystemClock.elapsedRealtime() else frame.changedAt, event.eventTime,
+                revision=frame.revision+1, configurationGeneration=repository.recognitionConfigurationGeneration(),
+                lastContentEventTime=maxOf(frame.lastContentEventTime,event.eventTime))
             foregroundFrame = frame
         } else if (observedPackage != frame.packageName || eventWindowId != frame.windowId) {
             // A content event's class is usually a widget, not an Activity. Adopt an
@@ -163,8 +185,17 @@ class ScreenCaptureService : AccessibilityService() {
             } finally {
                 root.release()
             }
-            frame = ForegroundFrame(observedPackage, "", eventWindowId,
-                frame.session + 1, SystemClock.elapsedRealtime(), frame.lastStateEventTime)
+            frame = ForegroundEpoch(observedPackage, "", eventWindowId,
+                frame.session + 1, SystemClock.elapsedRealtime(), frame.lastStateEventTime,
+                revision=frame.revision+1, configurationGeneration=repository.recognitionConfigurationGeneration(),
+                lastContentEventTime=event.eventTime)
+            foregroundFrame = frame
+        } else {
+            if (event.eventTime < frame.lastContentEventTime) return
+            // Any content/window revision invalidates an image acquired before this event.
+            frame = frame.copy(revision=frame.revision+1,
+                configurationGeneration=repository.recognitionConfigurationGeneration(),
+                lastContentEventTime=event.eventTime)
             foregroundFrame = frame
         }
         if (!sourceEnabled(observedPackage)) return
@@ -209,6 +240,9 @@ class ScreenCaptureService : AccessibilityService() {
                 durationMs = SystemClock.elapsedRealtime() - startedAt)
             publish(if (identity.sensitive) "当前是聊天、输入、敏感或无关页面，已跳过识别"
                 else "等待可确认身份的单笔交易结果或详情页", source)
+            repository.reportRecognitionDiagnostic(EvidenceType.ACCESSIBILITY,
+                if(identity.sensitive) "页面包含敏感或非交易内容" else "未确认独立交易页面身份",false,
+                SystemClock.elapsedRealtime()-startedAt)
             return
         }
         val snapshot = collectNodes(root, frame)
@@ -236,8 +270,21 @@ class ScreenCaptureService : AccessibilityService() {
             save(nodePayment, frame, source, EvidenceType.ACCESSIBILITY, startedAt)
             return
         }
+        // Node geometry can expose ambiguous real-pay fields without requiring a screenshot.
+        val nodePage = OcrDocument(snapshot.bounds.width(),snapshot.bounds.height(),snapshot.tokens.take(128).map {
+            OcrLine(it.text,OcrRect(it.bounds.left-snapshot.bounds.left,it.bounds.top-snapshot.bounds.top,
+                it.bounds.right-snapshot.bounds.left,it.bounds.bottom-snapshot.bounds.top))
+        },truncated=snapshot.tokens.size>128)
+        val nodeProposal=OcrReceiptLayoutParser.interpret(packageName,nodePage)
+        if(nodeProposal.payment!=null && nodeProposal.amountOptions.size>1) {
+            cancelOcrRetry()
+            if(isSameSafeWindow(frame)) save(nodeProposal.payment,frame,source,EvidenceType.ACCESSIBILITY,
+                startedAt,nodeProposal.amountOptions,nodeProposal.reasons)
+            return
+        }
         if (!repository.settings.value.screenOcrEnabled) {
             publish("本页文字不足，可开启本地截图识别或手动导入支付截图", source)
+            repository.reportRecognitionDiagnostic(EvidenceType.ACCESSIBILITY,"页面文字未能确定交易，截图识别未开启",false)
             return
         }
         if (!snapshot.complete || !ScreenCapturePolicy.mayUseOcr(
@@ -256,6 +303,11 @@ class ScreenCaptureService : AccessibilityService() {
             publish("此系统仅支持页面文字识别，请手动导入支付截图", source)
             return
         }
+        if(serviceInfo.capabilities and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT == 0) {
+            publish("系统尚未提供截图能力，请检查无障碍授权或手动导入截图",source)
+            repository.reportRecognitionDiagnostic(EvidenceType.OCR,"当前服务没有系统截图能力",false)
+            return
+        }
         val now = SystemClock.elapsedRealtime()
         val waitForOcr = ScreenCapturePolicy.OCR_INTERVAL_MS - (now - lastOcrAt)
         if (waitForOcr > 0) {
@@ -265,19 +317,19 @@ class ScreenCaptureService : AccessibilityService() {
         cancelOcrRetry()
         // Display screenshots on API 30–33 cannot isolate application windows. Reject a visible
         // keyboard or another application window and crop to the payment window after capture.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE && windows.any {
-                it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
-                    (it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.id != snapshot.windowId)
-            }
-        ) {
+        if (hasUnsafeDisplayWindow(snapshot.windowId, snapshot.bounds.asEvidenceBounds())) {
             publish("当前存在其他窗口，已跳过自动截图，请手动导入支付截图", source)
             return
         }
         if (!isSameSafeWindow(frame, forOcr = true)) return
         lastOcrAt = now
-        when (val attempt = takeBitmap(snapshot.windowId, snapshot.bounds)) {
+        val captureSnapshot = CaptureSnapshot(frame, snapshot.bounds.asEvidenceBounds())
+        when (val attempt = takeBitmap(captureSnapshot)) {
             is ScreenshotAttempt.Failed -> {
                 if (!coroutineContext.isActive || !isCurrentFrame(frame)) return
+                repository.reportRecognitionDiagnostic(EvidenceType.OCR,
+                    if(Build.VERSION.SDK_INT>=34 && attempt.errorCode==ERROR_TAKE_SCREENSHOT_SECURE_WINDOW)
+                        "支付窗口受保护，系统拒绝截图" else "系统未提供可用截图",false)
                 publish(
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
                         attempt.errorCode == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW
@@ -287,28 +339,36 @@ class ScreenCaptureService : AccessibilityService() {
             }
             is ScreenshotAttempt.Captured -> {
                 val bitmap = attempt.bitmap
-                val text = try {
+                val page = try {
                     if (!coroutineContext.isActive || !repository.settings.value.screenOcrEnabled ||
-                        !isSameSafeWindow(frame, forOcr = true)
+                        !captureStillValid(captureSnapshot)
                     ) return
-                    LocalTextRecognizer.recognize(bitmap)
+                    LocalTextRecognizer.recognizePage(bitmap)
                 } finally {
                     bitmap.recycle()
                 }
                 if (!coroutineContext.isActive || !repository.settings.value.screenOcrEnabled ||
-                    !isSameSafeWindow(frame, forOcr = true)
+                    !captureStillValid(captureSnapshot)
                 ) return
-                val payment = ScreenPaymentParser.parse(packageName, text, fromOcr = true)
-                if (payment == null) publish("未找到明确完成的单笔收支，请手动补录或导入支付截图", source)
-                else save(payment, frame, source, EvidenceType.OCR, startedAt)
+                mutableMetrics.value = snapshot.metrics.copy(ocrDurationMs=page.elapsedMs,ocrQueueWaitMs=page.queueWaitMs)
+                val interpreted = OcrReceiptLayoutParser.interpret(packageName, page)
+                val payment = interpreted.payment
+                if (payment == null) {
+                    repository.reportRecognitionDiagnostic(EvidenceType.OCR,interpreted.reasons.firstOrNull()
+                        ?: "图片没有明确的交易字段",false,page.elapsedMs)
+                    publish(interpreted.reasons.firstOrNull() ?: "未找到明确完成的单笔收支，请手动补录或导入支付截图", source)
+                } else save(payment, frame, source, EvidenceType.OCR, startedAt, interpreted.amountOptions,
+                    interpreted.reasons) { captureStillValid(captureSnapshot) }
             }
         }
     }
 
-    private suspend fun save(payment: ScreenPayment, frame: ForegroundFrame, source: String,
-                             evidence: EvidenceType, startedAt: Long) {
+    private suspend fun save(payment: ScreenPayment, frame: ForegroundEpoch, source: String,
+                             evidence: EvidenceType, startedAt: Long,
+                             amountOptions:List<Long> = emptyList(), reasons:List<String> = emptyList(),
+                             extraValidity:(() -> Boolean)? = null) {
         if (!coroutineContext.isActive || !sourceEnabled(frame.packageName) || !screenIsAvailable() ||
-            !isCurrentFrame(frame)) return
+            !isCurrentFrame(frame) || extraValidity?.invoke()==false) return
         val receiptSession = frame.session
         // The repository persists strong identifiers. Weak candidates are suppressed only while
         // the same receipt stays open, so separate equal-value transfers can both be reviewed.
@@ -316,15 +376,19 @@ class ScreenCaptureService : AccessibilityService() {
             lastSavedEvidence == evidence) return
         val amount = Money.format(payment.payment.amountCents)
         val direction = if (payment.payment.type == EntryType.EXPENSE) "支出" else "收入"
-        val saved = repository.ingest(CandidateFactory.fromScreen(payment, System.currentTimeMillis(), evidence)) {
+        val candidate = CandidateFactory.fromScreen(payment, System.currentTimeMillis(), evidence).let {
+            it.copy(amountOptions=amountOptions, reasons=(it.reasons+reasons).distinct())
+        }
+        val saved = repository.ingest(candidate) {
             isCurrentFrame(frame) && sourceEnabled(frame.packageName) &&
-                (evidence != EvidenceType.OCR || repository.settings.value.screenOcrEnabled) && screenIsAvailable()
+                (evidence != EvidenceType.OCR || repository.settings.value.screenOcrEnabled) && screenIsAvailable() &&
+                extraValidity?.invoke()!=false
         }
         // An in-flight database transaction may finish after navigation. Do not attribute
         // its status or redraw-suppression key to the new foreground session.
         if (!coroutineContext.isActive || !isCurrentFrame(frame)) return
         if (saved.disabled) {
-            publish("该来源的屏幕识别已关闭", source)
+            publish("页面已变化或识别已暂停，本次结果未保存", source)
             return
         }
         lastSavedReceiptKey = payment.receiptKey
@@ -344,7 +408,7 @@ class ScreenCaptureService : AccessibilityService() {
 
     private fun sourceEnabled(packageName: String): Boolean {
         val settings = repository.settings.value
-        if (!mutableConnectionState.value || !settings.screenEnabled) return false
+        if (repository.restoreBlocked.value || !mutableConnectionState.value || !settings.screenEnabled) return false
         return when (packageName) {
             ScreenCapturePolicy.WECHAT_PACKAGE -> settings.wechatEnabled
             ScreenCapturePolicy.ALIPAY_PACKAGE -> settings.alipayEnabled
@@ -356,22 +420,34 @@ class ScreenCaptureService : AccessibilityService() {
         getSystemService(PowerManager::class.java)?.isInteractive == true &&
             getSystemService(KeyguardManager::class.java)?.isKeyguardLocked != true
 
-    private fun isCurrentFrame(expected: ForegroundFrame): Boolean {
+    private fun isCurrentFrame(expected: ForegroundEpoch): Boolean {
         val current = foregroundFrame
-        return expected.windowId >= 0 && current.session == expected.session &&
-            current.packageName == expected.packageName && current.windowId == expected.windowId &&
-            current.activityClass == expected.activityClass
+        return expected.sameObservation(current) &&
+            expected.configurationGeneration == repository.recognitionConfigurationGeneration()
     }
 
     /** Main-thread lifecycle callbacks revoke all queued observations from the old session. */
-    private fun invalidateForegroundFrame(stateEventTime: Long? = null) {
+    private fun invalidateForegroundEpoch(stateEventTime: Long? = null) {
         val previous = foregroundFrame
-        foregroundFrame = ForegroundFrame(session = previous.session + 1,
+        foregroundFrame = ForegroundEpoch(session = previous.session + 1,
             changedAt = SystemClock.elapsedRealtime(),
-            lastStateEventTime = maxOf(previous.lastStateEventTime, stateEventTime ?: previous.lastStateEventTime))
+            lastStateEventTime = maxOf(previous.lastStateEventTime, stateEventTime ?: previous.lastStateEventTime),
+            revision=previous.revision+1, configurationGeneration=repository.recognitionConfigurationGeneration())
     }
 
-    private fun isSameSafeWindow(frame: ForegroundFrame, forOcr: Boolean = false): Boolean {
+    private fun captureStillValid(captured:CaptureSnapshot):Boolean {
+        val root = rootInActiveWindow ?: return false
+        val currentBounds = try {
+            if(root.packageName?.toString()!=captured.epoch.packageName || root.windowId!=captured.epoch.windowId) return false
+            Rect().also(root::getBoundsInScreen).asEvidenceBounds()
+        } finally { root.release() }
+        val selected=repository.settings.value
+        return captured.valid(foregroundFrame,repository.recognitionConfigurationGeneration(),currentBounds,
+            mutableConnectionState.value,selected.screenEnabled,sourceEnabled(captured.epoch.packageName),
+            selected.screenOcrEnabled,true) && isSameSafeWindow(captured.epoch,true)
+    }
+
+    private fun isSameSafeWindow(frame: ForegroundEpoch, forOcr: Boolean = false): Boolean {
         if (!isCurrentFrame(frame) || !sourceEnabled(frame.packageName) || !screenIsAvailable() ||
             ScreenCapturePolicy.isSensitiveContext("", frame.activityClass)) return false
         val root = rootInActiveWindow ?: return false
@@ -389,7 +465,27 @@ class ScreenCaptureService : AccessibilityService() {
         return isCurrentFrame(frame) && current.complete && !current.hasSensitiveInput &&
             (!forOcr || !current.hasRestrictedFields) &&
             !ScreenCapturePolicy.isSensitiveContext(current.text, frame.activityClass) &&
-            ScreenCapturePolicy.hasPaymentContext(current.text, frame.activityClass)
+            ScreenCapturePolicy.hasPaymentContext(current.text, frame.activityClass) &&
+            (!forOcr || !hasUnsafeDisplayWindow(current.windowId, current.bounds.asEvidenceBounds())) &&
+            isCurrentFrame(frame)
+    }
+
+    /** Recheck display isolation before capture, native OCR and commit. Window screenshots
+     * on API 34+ are isolated by the platform and do not need this display-only guard. */
+    @Suppress("DEPRECATION")
+    private fun hasUnsafeDisplayWindow(targetId: Int, targetBounds: ScreenNodeBounds): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return false
+        val observedWindows = windows
+        return try {
+            observedWindows.any { window ->
+                val otherBounds = Rect().also(window::getBoundsInScreen).asEvidenceBounds()
+                DisplayCaptureWindowPolicy.unsafeOtherWindow(targetId, targetBounds, window.id, otherBounds,
+                    window.type == AccessibilityWindowInfo.TYPE_APPLICATION,
+                    window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD)
+            }
+        } finally {
+            observedWindows.forEach { it.recycle() }
+        }
     }
 
     private fun cancelOcrRetry() {
@@ -425,7 +521,7 @@ class ScreenCaptureService : AccessibilityService() {
     }
 
     /** Small metadata/title probe. Ordinary chat/body nodes are not used as page identity. */
-    private fun probeReceiptIdentity(root: AccessibilityNodeInfo, frame: ForegroundFrame): TitleProbe {
+    private fun probeReceiptIdentity(root: AccessibilityNodeInfo, frame: ForegroundEpoch): TitleProbe {
         val window = Rect().also(root::getBoundsInScreen).asEvidenceBounds()
         val knownActivity = ScreenCapturePolicy.isKnownReceiptActivity(frame.activityClass)
         val queue = ArrayDeque<QueuedNode>().apply { add(QueuedNode(root, 0)) }
@@ -483,7 +579,7 @@ class ScreenCaptureService : AccessibilityService() {
     }
 
     /** Metadata is checked for the entire bounded tree before copying any receipt field. */
-    private fun collectNodes(root: AccessibilityNodeInfo, frame: ForegroundFrame): NodeSnapshot {
+    private fun collectNodes(root: AccessibilityNodeInfo, frame: ForegroundEpoch): NodeSnapshot {
         val startedAt = SystemClock.elapsedRealtime()
         val windowId = root.windowId
         val bounds = Rect().also(root::getBoundsInScreen)
@@ -576,21 +672,29 @@ class ScreenCaptureService : AccessibilityService() {
     private fun Rect.asEvidenceBounds() = ScreenNodeBounds(left, top, right, bottom)
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
-    private suspend fun takeBitmap(windowId: Int, windowBounds: Rect): ScreenshotAttempt = suspendCoroutine { continuation ->
+    private suspend fun takeBitmap(captured:CaptureSnapshot): ScreenshotAttempt = withContext(NonCancellable) { suspendCoroutine { continuation ->
         val callback = object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
                 val buffer = screenshot.hardwareBuffer
                 var hardware: Bitmap? = null
                 var software: Bitmap? = null
                 try {
+                    if(!scope.isActive || !isCurrentFrame(captured.epoch) || !sourceEnabled(captured.epoch.packageName)) {
+                        continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS))
+                        return
+                    }
                     hardware = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                    if (hardware == null || ScreenImageLimits.outputSize(hardware.width,hardware.height)==null) {
+                        continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR))
+                        return
+                    }
                     software = hardware?.copy(Bitmap.Config.ARGB_8888, false)
                     if (software == null) {
                         continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR))
                         return
                     }
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        val crop = Rect(windowBounds)
+                        val crop = captured.bounds.let { Rect(it.left,it.top,it.right,it.bottom) }
                         if (!crop.intersect(0, 0, software.width, software.height) || crop.isEmpty) {
                             continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR))
                             return
@@ -599,10 +703,19 @@ class ScreenCaptureService : AccessibilityService() {
                         if (cropped !== software) software.recycle()
                         software = cropped
                     }
+                    val size=ScreenImageLimits.outputSize(software.width,software.height)
+                        ?: throw IllegalArgumentException("Image exceeds processing bounds")
+                    if(size.first!=software.width || size.second!=software.height) {
+                        val scaled=Bitmap.createScaledBitmap(software,size.first,size.second,true)
+                        if(scaled!==software) software.recycle()
+                        software=scaled
+                    }
                     val bitmap = software
                     software = null // Ownership transfers to the waiting coroutine.
                     continuation.resume(ScreenshotAttempt.Captured(bitmap))
                 } catch (_: Exception) {
+                    continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR))
+                } catch (_: OutOfMemoryError) {
                     continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR))
                 } finally {
                     software?.recycle()
@@ -617,27 +730,27 @@ class ScreenCaptureService : AccessibilityService() {
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                takeScreenshotOfWindow(windowId, mainExecutor, callback)
+                takeScreenshotOfWindow(captured.epoch.windowId, IMAGE_EXECUTOR, callback)
             } else {
-                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, callback)
+                takeScreenshot(Display.DEFAULT_DISPLAY, IMAGE_EXECUTOR, callback)
             }
         } catch (_: Exception) {
             continuation.resume(ScreenshotAttempt.Failed(ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS))
         }
-    }
+    } }
 
     private fun publish(message: String, source: String? = null) {
         mutableStatus.value = ScreenCaptureStatus(message, System.currentTimeMillis(), source)
     }
 
     override fun onInterrupt() {
-        invalidateForegroundFrame()
+        invalidateForegroundEpoch()
         cancelOcrRetry()
         publish("屏幕识别被系统暂时中断，请检查无障碍服务")
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        invalidateForegroundFrame()
+        invalidateForegroundEpoch()
         cancelOcrRetry()
         mutableConnectionState.value = false
         publish("无障碍服务已断开")
@@ -645,7 +758,7 @@ class ScreenCaptureService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        invalidateForegroundFrame()
+        invalidateForegroundEpoch()
         cancelOcrRetry()
         mutableConnectionState.value = false
         events.close()
@@ -658,18 +771,9 @@ class ScreenCaptureService : AccessibilityService() {
     private fun AccessibilityNodeInfo.release() = recycle()
 
     private data class WindowEvent(
-        val frame: ForegroundFrame,
+        val frame: ForegroundEpoch,
         val recentWindowChange: Boolean,
         val paymentHint: Boolean,
-    )
-
-    private data class ForegroundFrame(
-        val packageName: String = "",
-        val activityClass: String = "",
-        val windowId: Int = -1,
-        val session: Long = 0,
-        val changedAt: Long = 0,
-        val lastStateEventTime: Long = 0,
     )
 
     private data class NodeSnapshot(
@@ -693,6 +797,10 @@ class ScreenCaptureService : AccessibilityService() {
     }
 
     companion object {
+        // Process lifetime executor: service cancellation must never discard buffer-closing callbacks.
+        private val IMAGE_EXECUTOR=Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable,"qingji-image-copy").apply { isDaemon=true }
+        }
         private val OBSERVED_EVENTS = setOf(
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,

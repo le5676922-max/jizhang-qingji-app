@@ -24,6 +24,7 @@ class UnifiedRecognitionInstrumentedTest {
         val suffix=UUID.randomUUID().toString()
         databaseName="unified-$suffix.db";preferencesName="unified-$suffix"
         repository=LedgerRepository.isolated(context,databaseName,preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         repository.updateSettings(repository.settings.value.copy(screenEnabled=true,screenOcrEnabled=true))
     }
     @After fun cleanup()=runBlocking {
@@ -54,6 +55,7 @@ class UnifiedRecognitionInstrumentedTest {
         repository.delete(requireNotNull(first.entryId))
         repository.closeForTesting()
         repository=LedgerRepository.isolated(context,databaseName,preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         val repeated=repository.ingest(candidate.copy(eventFingerprint="e".repeat(64)))
         assertTrue(repeated.duplicate)
         assertTrue(repository.entries.value.isEmpty())

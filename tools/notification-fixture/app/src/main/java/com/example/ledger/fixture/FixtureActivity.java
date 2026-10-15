@@ -50,6 +50,20 @@ public final class FixtureActivity extends Activity {
         int id;
         long eventTime = System.currentTimeMillis();
         switch (scenario) {
+            case "payment-order":
+            case "payment-order2":
+                id = scenario.endsWith("2") ? 107 : 106;
+                body = "支付成功28.00元，商户：合成便利店\n" + providerOrderLabel() + "：" +
+                        (scenario.endsWith("2") ? "SYN_PAY_0002" : "SYN_PAY_0001");
+                break;
+            case "refund-order":
+            case "refund-order2":
+            case "refund-over":
+                id = scenario.endsWith("over") ? 110 : scenario.endsWith("2") ? 109 : 108;
+                body = "退款成功" + (scenario.endsWith("over") ? "50.00" : scenario.endsWith("2") ? "3.00" : "5.00") +
+                        "元\n退款单号：" + (scenario.endsWith("over") ? "SYN_REFUND_0003" : scenario.endsWith("2") ? "SYN_REFUND_0002" : "SYN_REFUND_0001") +
+                        "\n原" + providerOrderLabel() + "：SYN_PAY_0001";
+                break;
             case "payment1":
                 id = 100;
                 eventTime = firstPaymentTime();
@@ -108,5 +122,9 @@ public final class FixtureActivity extends Activity {
         long now = System.currentTimeMillis();
         preferences.edit().putLong("payment1_when", now).commit();
         return now;
+    }
+
+    private String providerOrderLabel() {
+        return getPackageName().equals("com.tencent.mm") ? "微信支付交易单号" : "支付宝交易号";
     }
 }

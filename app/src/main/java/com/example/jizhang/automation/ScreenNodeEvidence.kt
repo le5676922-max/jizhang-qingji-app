@@ -26,11 +26,20 @@ internal data class ScreenNodeBounds(val left: Int, val top: Int, val right: Int
 
 internal data class ScreenNodeEvidence(val text: String, val bounds: ScreenNodeBounds, val depth: Int)
 
+/** A display screenshot must not include an overlapping notification, overlay or keyboard. */
+internal object DisplayCaptureWindowPolicy {
+    fun unsafeOtherWindow(targetId:Int,targetBounds:ScreenNodeBounds,otherId:Int,otherBounds:ScreenNodeBounds,
+                          application:Boolean,inputMethod:Boolean):Boolean =
+        otherId!=targetId && (application || inputMethod || targetBounds.overlaps(otherBounds))
+}
+
 data class ScreenCaptureMetrics(
     val visitedNodes: Int = 0,
     val retainedFields: Int = 0,
     val retainedCharacters: Int = 0,
     val durationMs: Long = 0,
+    val ocrDurationMs: Long = 0,
+    val ocrQueueWaitMs: Long = 0,
 )
 
 /** Limits the collector's retained output to transaction facts, not arbitrary receipt-page text. */

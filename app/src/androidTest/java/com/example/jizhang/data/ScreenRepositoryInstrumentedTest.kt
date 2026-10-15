@@ -8,6 +8,8 @@ import com.example.jizhang.domain.EntryType
 import com.example.jizhang.domain.LedgerEntry
 import com.example.jizhang.domain.ScreenPayment
 import com.example.jizhang.domain.ScreenPaymentParser
+import com.example.jizhang.domain.BusinessType
+import com.example.jizhang.recognition.RecognitionDecision
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -37,6 +39,7 @@ class ScreenRepositoryInstrumentedTest {
         databaseName = "screen-repository-test-$suffix.db"
         preferencesName = "screen-repository-test-$suffix"
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
     }
 
     @After
@@ -103,7 +106,8 @@ class ScreenRepositoryInstrumentedTest {
         enableScreen()
         val screen = receipt("TRANSFER20261013OCR", fromOcr = true)
         assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(screen, System.currentTimeMillis()))
-        assertTrue(repository.entries.value.single().needsReview)
+        assertTrue(repository.entries.value.isEmpty())
+        assertEquals(RecognitionDecision.REVIEW, repository.recognitionEvents.value.single().decision)
         assertEquals(0L, confirmedExpenseCents())
     }
 
@@ -112,9 +116,10 @@ class ScreenRepositoryInstrumentedTest {
         enableScreen()
         val screen = receipt(null)
         assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(screen, System.currentTimeMillis()))
-        val entry = repository.entries.value.single()
-        assertTrue(entry.needsReview)
-        assertTrue(entry.note.contains("缺少交易单号和时间"))
+        assertTrue(repository.entries.value.isEmpty())
+        val event = repository.recognitionEvents.value.single()
+        assertEquals(RecognitionDecision.REVIEW, event.decision)
+        assertTrue(event.reasons.any { it.contains("缺少稳定交易标识") })
         assertEquals(0L, confirmedExpenseCents())
     }
 
@@ -130,10 +135,11 @@ class ScreenRepositoryInstrumentedTest {
         val now = System.currentTimeMillis()
         assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(first, now))
         assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(second, now + 1_000))
-        val entries = repository.entries.value
-        assertEquals(2, entries.size)
-        assertTrue(entries.all { it.needsReview })
-        assertEquals(2, entries.map { it.fingerprint }.distinct().size)
+        val events = repository.recognitionEvents.value
+        assertTrue(repository.entries.value.isEmpty())
+        assertEquals(2, events.size)
+        assertTrue(events.all { it.decision == RecognitionDecision.REVIEW })
+        assertEquals(2, events.map { it.candidate.eventFingerprint }.distinct().size)
         assertEquals(0L, confirmedExpenseCents())
     }
 
@@ -150,9 +156,10 @@ class ScreenRepositoryInstrumentedTest {
         assertEquals(ScreenSaveResult.INSERTED, repository.addScreenPayment(timeOnly, now))
         assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(enriched, now + 1_000))
         val entries = repository.entries.value
-        assertEquals(2, entries.size)
-        assertEquals(1, entries.count { !it.needsReview })
-        assertTrue(entries.single { it.needsReview }.note.contains("页面交易信息发生变化"))
+        assertEquals(1, entries.size)
+        assertFalse(entries.single().needsReview)
+        assertEquals(2, repository.recognitionEvents.value.size)
+        assertEquals(entries.single().id, repository.recognitionEvents.value.single { it.decision == RecognitionDecision.REVIEW }.suggestedEntryId)
         assertEquals(10_000L, confirmedExpenseCents())
     }
 
@@ -168,8 +175,9 @@ class ScreenRepositoryInstrumentedTest {
         reopen()
         val enriched = receipt("TRANSFER20261013DELETED", transactionTime = second)
         assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(enriched, now + 1_000))
-        assertEquals(1, repository.entries.value.size)
-        assertTrue(repository.entries.value.single().needsReview)
+        assertTrue(repository.entries.value.isEmpty())
+        assertEquals(1, repository.deletedEntries.value.size)
+        assertEquals(1, repository.recognitionEvents.value.count { it.decision == RecognitionDecision.REVIEW })
         assertEquals(0L, confirmedExpenseCents())
     }
 
@@ -208,9 +216,10 @@ class ScreenRepositoryInstrumentedTest {
         assertEquals(ScreenSaveResult.NEEDS_REVIEW,
             repository.addScreenPayment(receipt("TRANSFER20261013A"), now + 1_000))
         val entries = repository.entries.value
-        assertEquals(2, entries.size)
-        assertFalse(entries.single { it.fingerprint == "a".repeat(64) }.needsReview)
-        assertTrue(entries.single { it.note.startsWith("屏幕识别") }.needsReview)
+        assertEquals(1, entries.size)
+        assertFalse(entries.single().needsReview)
+        assertEquals("a".repeat(64), entries.single().fingerprint)
+        assertEquals(1, repository.recognitionEvents.value.count { it.decision == RecognitionDecision.REVIEW })
         assertEquals(10_000L, confirmedExpenseCents())
     }
 
@@ -221,9 +230,9 @@ class ScreenRepositoryInstrumentedTest {
         assertEquals(ScreenSaveResult.INSERTED, repository.addScreenPayment(receipt("TRANSFER20261013A"), now))
         assertTrue(repository.addNotification(notification("c".repeat(64), now + 1_000), listOf("d".repeat(64))))
         val entries = repository.entries.value
-        assertEquals(2, entries.size)
-        assertFalse(entries.single { it.note.startsWith("屏幕识别") }.needsReview)
-        assertTrue(entries.single { it.fingerprint == "c".repeat(64) }.needsReview)
+        assertEquals(1, entries.size)
+        assertFalse(entries.single().needsReview)
+        assertEquals(RecognitionDecision.REVIEW, repository.recognitionEvents.value.single { it.candidate.eventFingerprint == "c".repeat(64) }.decision)
         assertEquals(10_000L, confirmedExpenseCents())
     }
 
@@ -238,8 +247,8 @@ class ScreenRepositoryInstrumentedTest {
         assertTrue(repository.addNotification(notification("e".repeat(64), now + 1_000), emptyList()))
         val entries = repository.entries.value
         assertEquals("核对后的转账", entries.single { it.id == screenEntry.id }.note)
-        assertTrue(entries.single { it.fingerprint == "e".repeat(64) }.needsReview)
-        assertEquals(2, entries.size)
+        assertEquals(RecognitionDecision.REVIEW, repository.recognitionEvents.value.single { it.candidate.eventFingerprint == "e".repeat(64) }.decision)
+        assertEquals(1, entries.size)
         assertEquals(10_000L, confirmedExpenseCents())
     }
 
@@ -256,8 +265,8 @@ class ScreenRepositoryInstrumentedTest {
             repository.addScreenPayment(receipt("TRANSFER20261013EDIT"), now + 1_000))
         val entries = repository.entries.value
         assertFalse(entries.single { it.id == notificationEntry.id }.needsReview)
-        assertTrue(entries.single { it.id != notificationEntry.id }.needsReview)
-        assertEquals(2, entries.size)
+        assertEquals(1, repository.recognitionEvents.value.count { it.decision == RecognitionDecision.REVIEW })
+        assertEquals(1, entries.size)
         assertEquals(10_000L, confirmedExpenseCents())
     }
 
@@ -268,7 +277,8 @@ class ScreenRepositoryInstrumentedTest {
         val screen = receipt("TRANSFER20261013MANUAL", fromOcr = true)
         assertEquals(ScreenSaveResult.NEEDS_REVIEW,
             repository.addScreenPayment(screen, System.currentTimeMillis(), userInitiated = true))
-        assertTrue(repository.entries.value.single().needsReview)
+        assertTrue(repository.entries.value.isEmpty())
+        assertEquals(RecognitionDecision.REVIEW, repository.recognitionEvents.value.single().decision)
         assertEquals(0L, confirmedExpenseCents())
         assertFalse(repository.settings.value.screenEnabled)
     }
@@ -285,13 +295,26 @@ class ScreenRepositoryInstrumentedTest {
         assertTrue(repository.entries.value.isEmpty())
     }
 
+    @Test
+    fun completedFriendTransferIsAReviewCandidateRatherThanConsumption() = runBlocking {
+        enableScreen()
+        val transfer = requireNotNull(ScreenPaymentParser.parse(WECHAT,
+            "转账详情\n转账成功\n转账金额：100.00元\n收款人：张三\n交易单号：TRANSFERREVIEW0001"))
+        assertEquals(BusinessType.TRANSFER, transfer.businessType)
+        assertEquals(ScreenSaveResult.NEEDS_REVIEW, repository.addScreenPayment(transfer, System.currentTimeMillis()))
+        assertTrue(repository.entries.value.isEmpty())
+        assertEquals(BusinessType.TRANSFER, repository.recognitionEvents.value.single().candidate.businessType)
+        assertEquals(RecognitionDecision.REVIEW, repository.recognitionEvents.value.single().decision)
+    }
+
     private fun enableScreen() {
-        repository.updateSettings(repository.settings.value.copy(screenEnabled = true))
+        repository.updateSettings(repository.settings.value.copy(autoEnabled = true, screenEnabled = true, screenOcrEnabled = true))
     }
 
     private suspend fun reopen() {
         repository.closeForTesting()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        repository.retryPendingRestore()
     }
 
     private fun receipt(
@@ -301,10 +324,11 @@ class ScreenRepositoryInstrumentedTest {
         transactionTime: String? = null,
     ): ScreenPayment {
         val text = buildList {
-            add("转账详情")
-            add("转账成功")
-            add("转账金额：100.00元")
-            add("收款人：张三")
+            // Dedup/storage fixtures are merchant expenses; generic friend transfers are REVIEW in V2.
+            add("付款详情")
+            add("支付成功")
+            add("实付金额：100.00元")
+            add("商户：张三")
             if (transactionId != null) add("交易单号：$transactionId")
             if (transactionTime != null) add("交易时间：$transactionTime")
         }.joinToString("\n")

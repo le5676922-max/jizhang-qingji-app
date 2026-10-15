@@ -37,21 +37,23 @@ import java.util.Locale
 
 /** Pure UI: the parent owns transactions, errors, durable ignoring, and association history. */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun RecognitionCenter(
     events: List<RecognitionEvent>,
     entries: List<LedgerEntry>,
     saving: Boolean,
     onConfirm: (RecognitionEvent, LedgerEntry, Boolean, Boolean, Boolean) -> Unit,
-    onLink: (Long, Long) -> Unit,
-    onIgnore: (Long) -> Unit,
-    onUndoIgnore: (Long) -> Unit,
-    onUnlink: (Long) -> Unit,
+    onLink: (RecognitionEvent, Long) -> Unit,
+    onIgnore: (RecognitionEvent) -> Unit,
+    onUndoIgnore: (RecognitionEvent) -> Unit,
+    onUnlink: (RecognitionEvent) -> Unit,
     onEditEntry: (Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var filter by rememberSaveable { mutableIntStateOf(0) }
     var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
-    val editing = events.firstOrNull { it.id == editingId }
+    var editingFingerprint by rememberSaveable { mutableStateOf<String?>(null) }
+    val editing = events.firstOrNull { it.id == editingId && it.candidate.eventFingerprint == editingFingerprint }
     val filtered = events.filter { event -> when (filter) {
         0 -> event.decision == RecognitionDecision.REVIEW
         2 -> event.decision == RecognitionDecision.IGNORE
@@ -69,7 +71,7 @@ fun RecognitionCenter(
                     }
                     TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭") }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("待确认", "全部", "已忽略").forEachIndexed { index, label ->
                         FilterChip(selected = filter == index, onClick = { filter = index },
                             modifier = Modifier.testTag("recognition-filter-$index"),
@@ -85,7 +87,7 @@ fun RecognitionCenter(
                     }
                     items(filtered, key = { it.id }) { event ->
                         RecognitionEventCard(event, events, entries, saving,
-                            onReview = { editingId = event.id }, onLink = onLink,
+                            onReview = { editingId = event.id; editingFingerprint = event.candidate.eventFingerprint }, onLink = onLink,
                             onIgnore = onIgnore, onUndoIgnore = onUndoIgnore,
                             onUnlink = onUnlink, onEditEntry = { id -> onEditEntry(id); onDismiss() })
                     }
@@ -100,16 +102,17 @@ fun RecognitionCenter(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun RecognitionEventCard(
     event: RecognitionEvent,
     events: List<RecognitionEvent>,
     entries: List<LedgerEntry>,
     saving: Boolean,
     onReview: () -> Unit,
-    onLink: (Long, Long) -> Unit,
-    onIgnore: (Long) -> Unit,
-    onUndoIgnore: (Long) -> Unit,
-    onUnlink: (Long) -> Unit,
+    onLink: (RecognitionEvent, Long) -> Unit,
+    onIgnore: (RecognitionEvent) -> Unit,
+    onUndoIgnore: (RecognitionEvent) -> Unit,
+    onUnlink: (RecognitionEvent) -> Unit,
     onEditEntry: (Long) -> Unit,
 ) {
     val candidate = event.candidate
@@ -144,22 +147,22 @@ private fun RecognitionEventCard(
                 HorizontalDivider()
                 Text("可能对应：¥${Money.format(suggested.amountCents)} · ${suggested.merchant.ifBlank { suggested.category }} · ${recognitionDate(suggested.occurredAt)}",
                     style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { onLink(event.id, suggested.id) },
+                TextButton(onClick = { onLink(event, suggested.id) },
                     enabled = !saving && candidate.completion == CompletionState.COMPLETED &&
                         candidate.amountOptions.distinct().size <= 1 && candidate.businessType != BusinessType.UNKNOWN &&
                         candidate.direction !in setOf(FundsDirection.UNKNOWN, FundsDirection.INTERNAL)) { Text("关联已有账单") }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (event.decision == RecognitionDecision.REVIEW) {
                     Button(onClick = onReview, enabled = !saving) { Text("核对并确认") }
-                    TextButton(onClick = { onIgnore(event.id) }, enabled = !saving) { Text("忽略") }
+                    TextButton(onClick = { onIgnore(event) }, enabled = !saving) { Text("忽略") }
                 }
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起详情" else "查看依据") }
             }
             if (event.userIgnored || event.association in setOf("ORDER", "MANUAL")) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (event.userIgnored) TextButton(onClick = { onUndoIgnore(event.id) }, enabled = !saving) { Text("恢复待确认") }
-                    if (event.association in setOf("ORDER", "MANUAL")) TextButton(onClick = { onUnlink(event.id) }, enabled = !saving) { Text("撤销关联") }
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (event.userIgnored) TextButton(onClick = { onUndoIgnore(event) }, enabled = !saving) { Text("恢复待确认") }
+                    if (event.association in setOf("ORDER", "MANUAL")) TextButton(onClick = { onUnlink(event) }, enabled = !saving) { Text("撤销关联") }
                 }
             }
             if (expanded) {
@@ -182,28 +185,31 @@ private fun RecognitionEventCard(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun RecognitionCandidateEditor(
     event: RecognitionEvent,
     entries: List<LedgerEntry>,
     saving: Boolean,
     onConfirm: (RecognitionEvent, LedgerEntry, Boolean, Boolean, Boolean) -> Unit,
-    onLink: (Long, Long) -> Unit,
-    onIgnore: (Long) -> Unit,
+    onLink: (RecognitionEvent, Long) -> Unit,
+    onIgnore: (RecognitionEvent) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val candidate = event.candidate
+    val linked = entries.firstOrNull { it.id == event.linkedEntryId && !event.linkedEntryDeleted }
     val context = LocalContext.current
-    var amount by rememberSaveable(event.id) { mutableStateOf(if (candidate.amountOptions.distinct().size > 1) "" else Money.format(candidate.amountCents)) }
-    var business by rememberSaveable(event.id) { mutableStateOf(candidate.businessType) }
-    var type by rememberSaveable(event.id) { mutableStateOf<EntryType?>(when (candidate.direction) {
+    var amount by rememberSaveable(event.id) { mutableStateOf(if (candidate.amountOptions.distinct().size > 1) "" else Money.format(linked?.amountCents ?: candidate.amountCents)) }
+    var business by rememberSaveable(event.id) { mutableStateOf(linked?.businessType ?: candidate.businessType) }
+    var type by rememberSaveable(event.id) { mutableStateOf<EntryType?>(linked?.type ?: when (candidate.direction) {
         FundsDirection.OUTGOING -> EntryType.EXPENSE
         FundsDirection.INCOMING -> EntryType.INCOME
         else -> null
     }) }
-    var merchant by rememberSaveable(event.id) { mutableStateOf(candidate.merchant) }
-    var category by rememberSaveable(event.id) { mutableStateOf(candidate.categorySuggestion) }
-    var occurredAt by rememberSaveable(event.id) { mutableLongStateOf(candidate.occurredAt) }
-    var relatedId by rememberSaveable(event.id) { mutableStateOf(event.relatedEntryId) }
+    var merchant by rememberSaveable(event.id) { mutableStateOf(linked?.merchant ?: candidate.merchant) }
+    var category by rememberSaveable(event.id) { mutableStateOf(linked?.category ?: candidate.categorySuggestion) }
+    var note by rememberSaveable(event.id) { mutableStateOf(linked?.note ?: "") }
+    var occurredAt by rememberSaveable(event.id) { mutableLongStateOf(linked?.occurredAt ?: candidate.occurredAt) }
+    var relatedId by rememberSaveable(event.id) { mutableStateOf(linked?.relatedEntryId ?: event.relatedEntryId) }
     var rememberCategory by rememberSaveable(event.id) { mutableStateOf(false) }
     var recordSeparately by rememberSaveable(event.id) { mutableStateOf(false) }
     var confirmCompleted by rememberSaveable(event.id) { mutableStateOf(false) }
@@ -211,8 +217,9 @@ private fun RecognitionCandidateEditor(
     var refundShown by rememberSaveable(event.id) { mutableIntStateOf(30) }
     val cents = Money.parseCents(amount)
     val suggested = entries.firstOrNull { it.id == event.suggestedEntryId }
-    val duplicateRisk = event.suggestedEntryId != null || event.reasons.any { it.contains("重复") || it.contains("冲突") || it.contains("关联") && !it.contains("退款") }
-    val remainingByEntry = remember(entries) { refundRemainingByEntry(entries) }
+    val duplicateRisk = event.suggestedEntryId != null && event.suggestedEntryId != linked?.id ||
+        linked == null && event.reasons.any { it.contains("重复") || it.contains("冲突") || it.contains("关联") && !it.contains("退款") }
+    val remainingByEntry = remember(entries, linked?.id) { refundRemainingByEntry(entries.filter { it.id != linked?.id || it.businessType != BusinessType.REFUND }) }
     val refundOptions = entries.filter { original ->
         !original.needsReview && original.businessType == BusinessType.EXPENSE && original.type == EntryType.EXPENSE &&
             original.id > 0 && (remainingByEntry[original.id] ?: 0L) >= (cents ?: 1L)
@@ -221,7 +228,7 @@ private fun RecognitionCandidateEditor(
     val completed = candidate.completion == CompletionState.COMPLETED ||
         (candidate.completion == CompletionState.UNCONFIRMED && confirmCompleted)
     val correctDirection = when (business) {
-        BusinessType.EXPENSE -> type == EntryType.EXPENSE
+        BusinessType.EXPENSE, BusinessType.REPAYMENT -> type == EntryType.EXPENSE
         BusinessType.INCOME, BusinessType.REFUND -> type == EntryType.INCOME
         else -> type != null
     }
@@ -244,12 +251,13 @@ private fun RecognitionCandidateEditor(
                 }
                 Text("${recognitionSourceLabel(candidate.provider)} · ${recognitionEvidenceLabel(candidate.evidence)}",
                     style = MaterialTheme.typography.bodySmall)
+                if (linked != null) Text("这条来源已关联账单 #${linked.id}，确认会修改已有账单。请同时核对已有内容。",
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.testTag("recognition-updates-existing"), style = MaterialTheme.typography.bodySmall)
                 event.reasons.forEach { Text(redactRecognitionText(it), style = MaterialTheme.typography.bodySmall) }
                 Text("业务类型", style = MaterialTheme.typography.titleSmall)
-                BusinessType.entries.toList().chunked(3).forEach { row ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        row.forEach { value -> FilterChip(selected = business == value, enabled = !saving,
-                            modifier = Modifier.weight(1f).testTag("recognition-business-$value"), onClick = {
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        BusinessType.entries.forEach { value -> FilterChip(selected = business == value, enabled = !saving,
+                            modifier = Modifier.testTag("recognition-business-$value"), onClick = {
                                 business = value
                                 category = when (value) {
                                     BusinessType.TRANSFER -> "转账"
@@ -261,12 +269,11 @@ private fun RecognitionCandidateEditor(
                                 }
                                 rememberCategory = false
                             }, label = { Text(recognitionBusinessLabel(value), fontSize = 12.sp) }) }
-                    }
                 }
                 if (business == BusinessType.UNKNOWN) Text("请先确认交易的经济含义。", color = MaterialTheme.colorScheme.error)
                 if (business in setOf(BusinessType.TRANSFER, BusinessType.REPAYMENT)) Text("这类资金往来不计入消费或新增收入。", style = MaterialTheme.typography.bodySmall)
                 Text("资金方向", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FilterChip(selected = type == EntryType.EXPENSE, enabled = !saving, onClick = { type = EntryType.EXPENSE },
                         modifier = Modifier.testTag("recognition-direction-EXPENSE"), label = { Text("资金转出") })
                     FilterChip(selected = type == EntryType.INCOME, enabled = !saving, onClick = { type = EntryType.INCOME },
@@ -279,12 +286,10 @@ private fun RecognitionCandidateEditor(
                     isError = cents == null, supportingText = { if (cents == null) Text("请输入正数，最多两位小数") })
                 if (candidate.amountOptions.distinct().size > 1) {
                     Text("识别到多个金额，请选择实际交易金额。", style = MaterialTheme.typography.bodySmall)
-                    candidate.amountOptions.distinct().filter { it in 1..Money.MAX_CENTS }.chunked(3).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            row.forEach { option -> FilterChip(selected = cents == option, enabled = !saving,
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            candidate.amountOptions.distinct().filter { it in 1..Money.MAX_CENTS }.forEach { option -> FilterChip(selected = cents == option, enabled = !saving,
                                 modifier = Modifier.testTag("recognition-amount-option-$option"),
                                 onClick = { amount = Money.format(option) }, label = { Text("¥${Money.format(option)}") }) }
-                        }
                     }
                 }
                 if (business == BusinessType.REFUND) {
@@ -305,17 +310,19 @@ private fun RecognitionCandidateEditor(
                 }
                 OutlinedTextField(merchant, onValueChange = { if (it.length <= 120) merchant = it },
                     label = { Text("商户 / 对方") }, modifier = Modifier.fillMaxWidth(), singleLine = true, enabled = !saving)
+                OutlinedTextField(note, onValueChange = { note = it.take(500) }, label = { Text("备注") },
+                    modifier = Modifier.fillMaxWidth(), maxLines = 3, enabled = !saving)
                 OutlinedTextField(if (business == BusinessType.REFUND) original?.category ?: "退款" else category,
                     onValueChange = { if (it.length <= 80) category = it }, label = { Text("分类") },
                     modifier = Modifier.fillMaxWidth(), singleLine = true, enabled = !saving && business != BusinessType.REFUND)
                 if (business in setOf(BusinessType.EXPENSE, BusinessType.INCOME)) {
                     val categories = if (business == BusinessType.EXPENSE) LedgerCategories.expense else LedgerCategories.income
-                    categories.chunked(4).forEach { row -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        row.forEach { value -> FilterChip(selected = category == value, enabled = !saving,
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        categories.forEach { value -> FilterChip(selected = category == value, enabled = !saving,
                             onClick = { category = value }, label = { Text(value, fontSize = 11.sp) }) }
-                    } }
+                    }
                 }
-                Row {
+                FlowRow(Modifier.fillMaxWidth()) {
                     TextButton(onClick = {
                         val calendar = Calendar.getInstance().apply { timeInMillis = occurredAt }
                         DatePickerDialog(context, { _, year, month, day ->
@@ -344,8 +351,10 @@ private fun RecognitionCandidateEditor(
                 if (suggested != null) {
                     HorizontalDivider()
                     Text("已有账单：¥${Money.format(suggested.amountCents)} · ${suggested.merchant.ifBlank { suggested.category }} · ${recognitionDate(suggested.occurredAt)}")
-                    OutlinedButton(onClick = { onLink(event.id, suggested.id) }, enabled = !saving && completed && cents != null &&
-                        business != BusinessType.UNKNOWN && correctDirection) { Text("确认是同一笔，关联已有账单") }
+                    OutlinedButton(onClick = { onLink(event, suggested.id) }, enabled = !saving &&
+                        candidate.completion == CompletionState.COMPLETED && candidate.amountOptions.distinct().size <= 1 &&
+                        candidate.businessType != BusinessType.UNKNOWN && candidate.direction !in setOf(FundsDirection.UNKNOWN, FundsDirection.INTERNAL) &&
+                        business == candidate.businessType && cents == candidate.amountCents && correctDirection) { Text("确认是同一笔，关联已有账单") }
                 }
                 if (duplicateRisk) RecognitionCheck("我已核对账本，确认这是一笔独立交易", recordSeparately, !saving) { recordSeparately = it }
                 Button(onClick = {
@@ -353,13 +362,13 @@ private fun RecognitionCandidateEditor(
                     val validType = type ?: return@Button
                     onConfirm(event, LedgerEntry(amountCents = validAmount, type = validType,
                         businessType = business, category = resolvedCategory,
-                        merchant = merchant.trim(), source = candidate.provider, occurredAt = occurredAt,
+                        merchant = merchant.trim(), note = note.trim(), source = candidate.provider, occurredAt = occurredAt,
                         relatedEntryId = if (business == BusinessType.REFUND) original?.id else null,
                         editedByUser = true), rememberCategory, recordSeparately, confirmCompleted)
                 }, enabled = canSave, modifier = Modifier.fillMaxWidth().testTag("recognition-confirm")) {
                     Text(if (saving) "保存中…" else "确认并保存账单")
                 }
-                TextButton(onClick = { onIgnore(event.id); onDismiss() }, enabled = !saving,
+                TextButton(onClick = { onIgnore(event); onDismiss() }, enabled = !saving,
                     modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("忽略这条识别来源") }
                 Spacer(Modifier.height(16.dp))
             }

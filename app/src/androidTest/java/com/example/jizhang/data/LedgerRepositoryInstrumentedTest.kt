@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.jizhang.automation.NotificationEventIdentity
 import com.example.jizhang.domain.EntrySource
+import com.example.jizhang.domain.BusinessType
 import com.example.jizhang.domain.EntryType
 import com.example.jizhang.domain.LedgerEntry
 import com.example.jizhang.domain.ParsedPayment
@@ -38,6 +39,7 @@ class LedgerRepositoryInstrumentedTest {
         databaseName = "ledger-test-$suffix.db"
         preferencesName = "ledger-test-$suffix"
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
     }
 
     @After
@@ -57,6 +59,7 @@ class LedgerRepositoryInstrumentedTest {
         assertFalse(repository.add(entry))
         repository.closeForTesting()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         assertFalse(repository.add(entry))
         assertTrue(repository.entries.value.isEmpty())
     }
@@ -73,10 +76,11 @@ class LedgerRepositoryInstrumentedTest {
 
     @Test
     fun updatedNotificationAliasesRemainSeenAfterDeletion() = runBlocking {
-        val original = payment("f".repeat(64))
+        repository.updateSettings(repository.settings.value.copy(autoEnabled=true))
+        val original = payment("f".repeat(64)).copy(needsReview=false)
         val instanceHash = "1".repeat(64)
         assertTrue(repository.addNotification(original, listOf(instanceHash)))
-        val update = payment("2".repeat(64))
+        val update = payment("2".repeat(64)).copy(needsReview=false)
         assertFalse(repository.addNotification(update, listOf(instanceHash)))
         repository.delete(repository.entries.value.single().id)
         assertFalse(repository.addNotification(payment("3".repeat(64)), listOf(instanceHash)))
@@ -87,12 +91,13 @@ class LedgerRepositoryInstrumentedTest {
 
     @Test
     fun merchantEnrichmentWithANewPostTimeDoesNotDuplicateTheTransaction() = runBlocking {
+        repository.updateSettings(repository.settings.value.copy(autoEnabled=true))
         val parsed = ParsedPayment(1_230, EntryType.EXPENSE, "其他", "", EntrySource.WECHAT)
         val first = NotificationEventIdentity.create("com.tencent.mm", "key", 1_001, 1_000, parsed)
         val enriched = NotificationEventIdentity.create("com.tencent.mm", "key", 2_000, 1_000,
             parsed.copy(merchant = "新增商户", category = "餐饮"))
-        assertTrue(repository.addNotification(payment(first.primary), listOfNotNull(first.stableTransaction)))
-        assertFalse(repository.addNotification(payment(enriched.primary).copy(merchant = "新增商户"),
+        assertTrue(repository.addNotification(payment(first.primary).copy(needsReview=false), listOfNotNull(first.stableTransaction)))
+        assertFalse(repository.addNotification(payment(enriched.primary).copy(merchant = "新增商户",needsReview=false),
             listOfNotNull(enriched.stableTransaction)))
         assertEquals(1, repository.entries.value.size)
     }
@@ -121,11 +126,28 @@ class LedgerRepositoryInstrumentedTest {
             merchant = "+mall",
             note = "=SUM(1,2)\n\"quoted\"",
         ))
+        repository.add(LedgerEntry(amountCents = 2_000, type = EntryType.EXPENSE, category = "购物", merchant = "原消费"))
+        val original = repository.entries.value.single { it.merchant == "原消费" }
+        repository.add(LedgerEntry(amountCents = 500, type = EntryType.INCOME, category = "购物", merchant = "退款来源",
+            businessType = BusinessType.REFUND, relatedEntryId = original.id))
+        repository.add(LedgerEntry(amountCents = 700, type = EntryType.EXPENSE, category = "转账", merchant = "内部转移",
+            businessType = BusinessType.TRANSFER))
+        repository.add(LedgerEntry(amountCents = 800, type = EntryType.EXPENSE, category = "还款", merchant = "信用卡还款",
+            businessType = BusinessType.REPAYMENT))
         val csv = repository.exportCsv()
-        assertTrue(csv.startsWith("\uFEFF日期"))
+        assertEquals("\uFEFF日期,类型,金额（元）,分类,商家,备注,来源,待核对,经济类型,关联原消费ID", csv.substringBefore("\r\n"))
         assertTrue(csv.contains("\"'+mall\""))
         assertTrue(csv.contains("\"'=SUM(1,2)\n\"\"quoted\"\"\""))
         assertTrue(csv.contains("\"12.30\""))
+        val refund = csv.lineSequence().single { it.contains("\"退款来源\"") }
+        assertTrue(refund.contains("\"收入\",\"5.00\""))
+        assertTrue(refund.endsWith("\"REFUND\",\"${original.id}\""))
+        val transfer = csv.lineSequence().single { it.contains("\"内部转移\"") }
+        assertTrue(transfer.contains("\"支出\",\"7.00\""))
+        assertTrue(transfer.endsWith("\"TRANSFER\",\"\""))
+        val repayment = csv.lineSequence().single { it.contains("\"信用卡还款\"") }
+        assertTrue(repayment.endsWith("\"REPAYMENT\",\"\""))
+        assertTrue(csv.contains("\"是\",\"EXPENSE\",\"\""))
     }
 
     @Test
@@ -147,6 +169,7 @@ class LedgerRepositoryInstrumentedTest {
         assertTrue(enabledAt in 1..System.currentTimeMillis())
         repository.closeForTesting()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         assertEquals(expected, repository.settings.value)
         assertEquals(enabledAt, repository.automationEnabledSince())
         repository.updateSettings(expected.copy(autoEnabled = false))
@@ -161,11 +184,13 @@ class LedgerRepositoryInstrumentedTest {
         assertEquals(warning, repository.captureError.value)
         repository.closeForTesting()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         assertEquals(warning, repository.captureError.value)
         repository.acknowledgeCaptureError()
         assertNull(repository.captureError.value)
         repository.closeForTesting()
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         assertNull(repository.captureError.value)
     }
 

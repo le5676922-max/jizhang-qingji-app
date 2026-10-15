@@ -42,8 +42,9 @@ internal fun decodeStrings(value: String): List<String> = JSONArray(value).let {
     List(array.length()) { array.getString(it) }
 }
 
-internal fun readRecognitionEvents(db: SQLiteDatabase): List<RecognitionEvent> = db.rawQuery(
-    "SELECT s.*, e.deleted_at AS linked_deleted_at, (SELECT a.action FROM link_actions a WHERE a.event_id=s.id ORDER BY a.id DESC LIMIT 1) AS last_user_action FROM source_events s LEFT JOIN entries e ON s.linked_entry_id=e.id ORDER BY s.observed_at DESC,s.id DESC", null,
+internal fun readRecognitionEvents(db: SQLiteDatabase, filter: String? = null, arguments: Array<String>? = null): List<RecognitionEvent> = db.rawQuery(
+    "SELECT s.*, e.deleted_at AS linked_deleted_at, (SELECT a.action FROM link_actions a WHERE a.event_id=s.id ORDER BY a.id DESC LIMIT 1) AS last_user_action FROM source_events s LEFT JOIN entries e ON s.linked_entry_id=e.id" +
+        (if (filter == null) "" else " WHERE $filter") + " ORDER BY s.observed_at DESC,s.id DESC", arguments,
 ).use { cursor -> buildList {
     while (cursor.moveToNext()) {
         val options = JSONArray(cursor.text("amount_options"))

@@ -2,10 +2,14 @@ package com.example.jizhang.ui
 
 import android.content.Context
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -13,6 +17,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.espresso.Espresso.closeSoftKeyboard
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -20,7 +25,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.example.jizhang.data.LedgerRepository
 import com.example.jizhang.domain.EntrySource
 import com.example.jizhang.domain.EntryType
+import com.example.jizhang.domain.BusinessType
+import com.example.jizhang.domain.LedgerEntry
 import com.example.jizhang.domain.ScreenPaymentParser
+import com.example.jizhang.recognition.CandidateFactory
+import com.example.jizhang.recognition.EvidenceType
+import com.example.jizhang.recognition.RecognitionDecision
 import com.example.jizhang.ui.theme.JizhangTheme
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -54,6 +64,7 @@ class LedgerUiInstrumentedTest {
         databaseName = "ledger-ui-test-$suffix.db"
         preferencesName = "ledger-ui-test-$suffix"
         repository = LedgerRepository.isolated(context, databaseName, preferencesName)
+        runBlocking { repository.retryPendingRestore() }
         composeRule.setContent {
             JizhangTheme { LedgerApp(repositoryOverride = repository) }
         }
@@ -175,21 +186,136 @@ class LedgerUiInstrumentedTest {
     fun screenshotCandidateIsExcludedUntilUserConfirmsIt() {
         val candidate = ScreenPaymentParser.parse("com.tencent.mm",
             "转账详情\n转账成功\n转账金额：12.34元\n收款人：截图测试\n交易单号：SCREENUITEST20261013", fromOcr = true)!!
-        runBlocking { repository.addScreenPayment(candidate, System.currentTimeMillis(), userInitiated = true) }
-        composeRule.waitUntil(5_000) { repository.entries.value.size == 1 }
+        runBlocking { repository.ingest(CandidateFactory.fromScreen(candidate, System.currentTimeMillis(), EvidenceType.IMPORTED_IMAGE, userInitiated = true)) }
+        composeRule.waitUntil(5_000) { repository.recognitionEvents.value.size == 1 }
+        composeRule.runOnIdle {
+            assertTrue(repository.entries.value.isEmpty())
+            assertEquals(RecognitionDecision.REVIEW, repository.recognitionEvents.value.single().decision)
+        }
         composeRule.onNodeWithTag("monthly-expense").assertTextEquals("¥ 0.00")
         composeRule.onNodeWithText("自动记账").performClick()
         composeRule.onNodeWithText("查看待确认账单").performScrollTo().performClick()
-        composeRule.onNodeWithText("截图测试", useUnmergedTree = true).performClick()
-        composeRule.onNodeWithText("确认并保存").performScrollTo().performClick()
-        composeRule.waitUntil(5_000) { repository.entries.value.singleOrNull()?.needsReview == false }
+        composeRule.onNodeWithText("核对并确认").performScrollTo().performClick()
+        composeRule.onNodeWithTag("recognition-business-EXPENSE").performScrollTo().performClick()
+        composeRule.onNodeWithTag("recognition-confirm").performScrollTo().performClick()
+        composeRule.waitUntil(5_000) { repository.entries.value.singleOrNull()?.businessType == BusinessType.EXPENSE }
+        composeRule.runOnIdle { assertFalse(repository.entries.value.single().needsReview) }
         composeRule.onNodeWithText("概览").performClick()
         composeRule.onNodeWithTag("monthly-expense").assertTextEquals("¥ 12.34")
+    }
+
+    @Test
+    fun transferIsExcludedFromConsumptionAndEditingDirectionChangesIncomeBusiness() {
+        openEntryEditor()
+        composeRule.onNodeWithTag("entry-business-TRANSFER").performScrollTo().performClick()
+        enterText("金额（元）", "86.00")
+        enterText("商户 / 对方（选填）", "往来测试")
+        saveEntry()
+        composeRule.waitUntil(5_000) { repository.entries.value.size == 1 }
+        composeRule.onNodeWithTag("monthly-expense").assertTextEquals("¥ 0.00")
+        val id = repository.entries.value.single().id
+        composeRule.onNodeWithText("账单").performClick()
+        composeRule.onNodeWithTag("ledger-entry-$id").performScrollTo().performClick()
+        composeRule.onNodeWithTag("entry-business-EXPENSE").performClick()
+        composeRule.onNodeWithTag("entry-direction-INCOME").performClick()
+        saveEntry()
+        composeRule.waitUntil(5_000) { repository.entries.value.single().businessType == BusinessType.INCOME }
+        composeRule.runOnIdle { assertEquals(EntryType.INCOME, repository.entries.value.single().type) }
+        composeRule.onNodeWithText("概览").performClick()
+        composeRule.onNodeWithTag("monthly-expense").assertTextEquals("¥ 0.00")
+        composeRule.onNodeWithTag("monthly-income").assertTextEquals("¥ 86.00").assertIsDisplayed()
+    }
+
+    @Test
+    fun partialRefundRequiresOriginalConsumptionAndReducesConsumption() {
+        runBlocking { repository.add(LedgerEntry(amountCents = 10_000, type = EntryType.EXPENSE, category = "购物", merchant = "原消费测试")) }
+        composeRule.waitUntil(5_000) { repository.entries.value.size == 1 }
+        val originalId = repository.entries.value.single().id
+        openEntryEditor()
+        composeRule.onNodeWithTag("entry-business-REFUND").performScrollTo().performClick()
+        enterText("金额（元）", "30.00")
+        closeSoftKeyboard()
+        composeRule.onNodeWithTag("entry-refund-original-$originalId").performScrollTo().performClick()
+        saveEntry()
+        composeRule.waitUntil(5_000) { repository.entries.value.size == 2 }
+        composeRule.runOnIdle {
+            val refund = repository.entries.value.single { it.businessType == BusinessType.REFUND }
+            assertEquals(originalId, refund.relatedEntryId)
+            assertEquals(EntryType.INCOME, refund.type)
+            assertEquals("购物", refund.category)
+        }
+        composeRule.onNodeWithTag("monthly-expense").assertTextEquals("¥ 70.00")
+        composeRule.onNodeWithTag("monthly-income").assertTextEquals("¥ 0.00").assertIsDisplayed()
+    }
+
+    @Test
+    fun deletedEntryCanBeRestoredFromRecycleBin() {
+        runBlocking { repository.add(LedgerEntry(amountCents = 750, type = EntryType.EXPENSE, category = "餐饮", merchant = "回收测试", note = "保持备注")) }
+        composeRule.waitUntil(5_000) { repository.entries.value.size == 1 }
+        val id = repository.entries.value.single().id
+        composeRule.onNodeWithText("账单").performClick()
+        composeRule.onNodeWithTag("ledger-entry-$id").performScrollTo().performClick()
+        composeRule.onNodeWithText("删除这笔账单").performScrollTo().performClick()
+        composeRule.onNodeWithText("删除", useUnmergedTree = true).performClick()
+        composeRule.waitUntil(5_000) { repository.entries.value.isEmpty() && repository.deletedEntries.value.size == 1 }
+        dismissFeedback("账单已移入回收站")
+        composeRule.onNodeWithText("自动记账").performClick()
+        composeRule.onNodeWithTag("open-recycle-bin").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("recycle-bin").assertIsDisplayed()
+        composeRule.onNodeWithTag("restore-entry-$id").performScrollTo().performClick()
+        composeRule.waitUntil(5_000) { repository.entries.value.singleOrNull()?.id == id }
+        composeRule.runOnIdle {
+            assertEquals("保持备注", repository.entries.value.single().note)
+            assertTrue(repository.deletedEntries.value.isEmpty())
+        }
+        composeRule.onNodeWithText("关闭").performClick()
+        composeRule.onNodeWithText("概览").performClick()
+        composeRule.onNodeWithTag("monthly-expense").assertTextEquals("¥ 7.50")
+    }
+
+    @Test
+    fun rememberedMerchantCategoryCanBeRemovedWithoutChangingItsBill() {
+        openEntryEditor()
+        enterText("金额（元）", "18.50")
+        enterText("商户 / 对方（选填）", "分类规则测试")
+        closeSoftKeyboard()
+        composeRule.onNodeWithTag("entry-remember-category").performScrollTo().performClick()
+        saveEntry()
+        composeRule.waitUntil(5_000) { repository.merchantRules.value.size == 1 }
+        val key = repository.merchantRules.value.single().merchantKey
+        dismissFeedback("账单已保存")
+        composeRule.onNodeWithText("自动记账").performClick()
+        composeRule.onNodeWithTag("open-category-rules").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("category-rules").assertIsDisplayed()
+        composeRule.onNodeWithTag("delete-rule-$key").performScrollTo().performClick()
+        composeRule.onNodeWithTag("confirm-delete-rule").performClick()
+        composeRule.waitUntil(5_000) { repository.merchantRules.value.isEmpty() }
+        composeRule.runOnIdle {
+            assertEquals("餐饮", repository.entries.value.single().category)
+            assertEquals(1850L, repository.entries.value.single().amountCents)
+        }
     }
 
     private fun enterText(label: String, value: String) {
         composeRule.onNode(hasSetTextAction() and hasText(label))
             .performScrollTo().performTextReplacement(value)
+    }
+
+    private fun dismissFeedback(message: String) {
+        // A bottom snackbar can cover a management button after performScrollTo positions it
+        // at the viewport edge. Assert the actual feedback, then dismiss it through the host's
+        // accessibility action before continuing. Its automatic timeout uses the Compose test
+        // clock and can also be extended by system accessibility settings, so wall time is not
+        // a reliable timeout here. Dismiss does not perform the snackbar's "撤销" action.
+        composeRule.waitUntil(5_000) { composeRule.onAllNodes(hasText(message)).fetchSemanticsNodes().isNotEmpty() }
+        composeRule.onNodeWithText(message).assertIsDisplayed()
+        composeRule.onNode(
+            SemanticsMatcher.keyIsDefined(SemanticsActions.Dismiss) and hasAnyDescendant(hasText(message)),
+            useUnmergedTree = true,
+        ).performSemanticsAction(SemanticsActions.Dismiss) { dismiss ->
+            assertTrue("Snackbar dismissal was not handled", dismiss())
+        }
+        composeRule.waitUntil(5_000) { composeRule.onAllNodes(hasText(message)).fetchSemanticsNodes().isEmpty() }
     }
 
     private fun saveEntry() {

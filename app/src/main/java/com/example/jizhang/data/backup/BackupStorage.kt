@@ -113,6 +113,20 @@ object BackupStorage {
                     val rows = tables.getJSONArray(table)
                     for (index in 0 until rows.length()) db.insertOrThrow(table, null, values(table, rows.getJSONObject(index)))
                 }
+                // An old/imported allocator high-water mark must not poison future inserts.
+                // These are fixed internal tables; no table or SQL fragment comes from the file.
+                listOf("entries", "source_events", "link_actions").forEach { table ->
+                    val maximum = db.query(table, arrayOf("COALESCE(MAX(id),0)"), null, null, null, null, null)
+                        .use { cursor ->
+                            if (!cursor.moveToFirst()) throw BackupStorageException("备份编号恢复未完成。")
+                            cursor.getLong(0)
+                        }
+                    db.delete("sqlite_sequence", "name = ?", arrayOf(table))
+                    db.insertOrThrow("sqlite_sequence", null, ContentValues().apply {
+                        put("name", table)
+                        put("seq", maximum)
+                    })
+                }
                 db.rawQuery("PRAGMA foreign_key_check", null).use { cursor ->
                     if (cursor.moveToFirst()) throw BackupStorageException("备份关联完整性检查失败。")
                 }

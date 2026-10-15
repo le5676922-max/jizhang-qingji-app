@@ -147,4 +147,19 @@ class TransactionMatcherTest {
         assertNull(multiple.strongEntryId)
         assertEquals(listOf(7L, 8L), multiple.suggestedEntryIds)
     }
+
+    @Test fun sameRefundOrderWithDifferentKnownOriginalPaymentIsAConflict() {
+        val refund = candidate.copy(businessType = BusinessType.REFUND, direction = FundsDirection.INCOMING,
+            orderNamespace = "provider_refund", originalOrderNamespace = "provider_transaction")
+        val canonical = entry.copy(type = EntryType.INCOME, businessType = BusinessType.REFUND, relatedEntryId = 20)
+        val previous = MatcherEventSnapshot(refund, order, 7, originalOrderIdentity = "d".repeat(64))
+        val result = TransactionMatcher.match(refund, order, listOf(previous), listOf(MatcherEntrySnapshot(canonical)), "e".repeat(64))
+        assertTrue(result.identityConflict)
+        assertNull(result.strongEntryId)
+        assertEquals(listOf(7L), result.suggestedEntryIds)
+        assertEquals(20L, canonical.relatedEntryId)
+        val deleted = TransactionMatcher.match(refund, order, listOf(previous), listOf(MatcherEntrySnapshot(canonical, true)), "e".repeat(64))
+        assertFalse(deleted.deletedOrderSuppressed)
+        assertTrue(deleted.identityConflict)
+    }
 }

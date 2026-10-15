@@ -45,6 +45,23 @@ public final class TransferResultActivity extends Activity {
         content.setPadding(dp(24), dp(26), dp(24), dp(30));
 
         switch (scenario) {
+            case "screen-payment":
+            case "screen-payment2":
+                title(content, "付款详情");
+                line(content, "支付成功");
+                line(content, "实付金额：28.00元");
+                line(content, "商户名称：合成便利店");
+                line(content, providerOrderLabel() + "：" + (scenario.endsWith("2") ? "SYN_PAY_0002" : "SYN_PAY_0001"));
+                break;
+            case "screen-refund":
+            case "screen-refund2":
+            case "screen-refund-over":
+                title(content, "交易详情");
+                line(content, "退款成功");
+                line(content, "退款金额：" + (scenario.endsWith("over") ? "50.00" : scenario.endsWith("2") ? "3.00" : "5.00") + "元");
+                line(content, "退款单号：" + (scenario.endsWith("over") ? "SYN_REFUND_0003" : scenario.endsWith("2") ? "SYN_REFUND_0002" : "SYN_REFUND_0001"));
+                line(content, "原" + providerOrderLabel() + "：SYN_PAY_0001");
+                break;
             case "screen-transfer":
                 title(content, "转账详情");
                 line(content, "转账成功");
@@ -143,6 +160,10 @@ public final class TransferResultActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private String providerOrderLabel() {
+        return getPackageName().equals("com.tencent.mm") ? "微信支付交易单号" : "支付宝交易号";
     }
 
     private static final class ReceiptCanvas extends View {

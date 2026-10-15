@@ -19,6 +19,7 @@ class BackupValidationException(val field: String) : Exception("备份内容校�
 
 /** Validates an entire decrypted snapshot before the repository mutates any persistent data. */
 object BackupDocumentValidator {
+    const val MAX_IDENTIFIER_ID = 9_007_199_254_740_991L // 2^53 - 1, far below SQLite's allocator ceiling.
     private const val MAX_MONEY = 99_999_999_999L
     private const val MAX_ROWS_PER_TABLE = 100_000
     private const val MAX_TOTAL_ROWS = 200_000
@@ -146,7 +147,12 @@ object BackupDocumentValidator {
                 reference(row, field, entries.keys)
             }
             nullablePositive(row, "related_entry_id")?.let { original ->
-                if (row.getString("business_type") != "REFUND" || !isExpense(entries.getValue(original))) invalid("source_events.退款关联")
+                val linked = nullablePositive(row, "linked_entry_id")?.let(entries::getValue)
+                // Manual confirmation changes the canonical record without rewriting raw evidence.
+                val confirmedRefund = linked != null && linked.getString("business_type") == "REFUND" &&
+                    nullablePositive(linked, "related_entry_id") == original
+                if (!isExpense(entries.getValue(original)) ||
+                    row.getString("business_type") != "REFUND" && !confirmedRefund) invalid("source_events.退款关联")
             }
         }
         val aliases = mutableMapOf<String, Long>()
@@ -232,7 +238,9 @@ object BackupDocumentValidator {
         is Long -> value
         else -> invalid(field)
     }
-    private fun positive(row: JSONObject, key: String): Long = integer(row, key).also { if (it <= 0) invalid(key) }
+    private fun positive(row: JSONObject, key: String): Long = integer(row, key).also {
+        if (it <= 0 || (key == "id" || key.endsWith("_id")) && it > MAX_IDENTIFIER_ID) invalid(key)
+    }
     private fun nonnegative(row: JSONObject, key: String): Long = integer(row, key).also { if (it < 0) invalid(key) }
     private fun nullablePositive(row: JSONObject, key: String): Long? = if (row.isNull(key)) null else positive(row, key)
     private fun flag(row: JSONObject, key: String): Long = integer(row, key).also { if (it !in 0..1) invalid(key) }

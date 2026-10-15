@@ -12,6 +12,10 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.test.espresso.Espresso.closeSoftKeyboard
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.example.jizhang.data.RecognitionEvent
@@ -44,15 +48,18 @@ class RecognitionCenterInstrumentedTest {
     private val unlinkedEvents = mutableListOf<Long>()
     private val editedEntries = mutableListOf<Long>()
     private var rememberedCategory = false
+    private var confirmedFingerprint: String? = null
+    private var separatelyConfirmed = false
 
     @Test
     fun unknownDirectionAndMultipleAmountsRequireExplicitChoicesAndExactCents() {
         val event = reviewEvent(candidate().copy(businessType = BusinessType.UNKNOWN,
             direction = FundsDirection.UNKNOWN, amountOptions = listOf(1_230L, 9_900L)))
-        showCenter(listOf(event))
-        composeRule.onNodeWithText("核对并确认").performClick()
+        showCenter(listOf(event), narrowLargeFont = true)
+        composeRule.onNodeWithText("核对并确认").performScrollTo().performClick()
         assertCannotSave()
 
+        composeRule.onNodeWithTag("recognition-business-REPAYMENT").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("recognition-business-EXPENSE").performScrollTo().performClick()
         assertCannotSave()
         composeRule.onNodeWithTag("recognition-amount-option-1230").performScrollTo().performClick()
@@ -134,18 +141,61 @@ class RecognitionCenterInstrumentedTest {
         }
     }
 
+    @Test
+    fun reviewingLinkedEvidenceStartsFromCanonicalBillAndClearlyUpdatesIt() {
+        val canonical = expense(70, 5_000, "人工商户", "购物").copy(note = "已核对备注", editedByUser = true)
+        val event = reviewEvent(candidate()).copy(linkedEntryId = canonical.id, association = "ORDER",
+            reasons = listOf("同一订单的金额凭据存在冲突，需要核对"))
+        showCenter(listOf(event), listOf(canonical))
+        composeRule.onNodeWithText("核对并确认").performClick()
+        composeRule.onNodeWithTag("recognition-updates-existing").assertIsDisplayed()
+        composeRule.onNodeWithTag("recognition-confirm").performScrollTo().assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            val edited = capturedEntries.single()
+            assertEquals(5_000L, edited.amountCents)
+            assertEquals("购物", edited.category)
+            assertEquals("已核对备注", edited.note)
+            assertFalse(separatelyConfirmed)
+        }
+    }
+
+    @Test
+    fun replacingRestoredEventWithSameIdInvalidatesItsOpenEditor() {
+        val events = mutableStateOf(listOf(reviewEvent(candidate())))
+        composeRule.setContent { JizhangTheme {
+            RecognitionCenter(events.value, emptyList(), saving = false,
+                onConfirm = { event, entry, _, _, _ -> confirmedFingerprint = event.candidate.eventFingerprint; capturedEntries += entry },
+                onLink = { _, _ -> }, onIgnore = {}, onUndoIgnore = {}, onUnlink = {}, onEditEntry = {}, onDismiss = {})
+        } }
+        composeRule.onNodeWithText("核对并确认").performClick()
+        composeRule.onNodeWithTag("recognition-confirm").performScrollTo().assertIsEnabled()
+        composeRule.runOnIdle { events.value = listOf(reviewEvent(candidate().copy(eventFingerprint = "b".repeat(64), amountCents = 2_500))) }
+        composeRule.onNodeWithTag("recognition-confirm").assertDoesNotExist()
+        composeRule.runOnIdle { assertTrue(capturedEntries.isEmpty()) }
+        composeRule.onNodeWithText("核对并确认").performClick()
+        composeRule.onNodeWithTag("recognition-confirm").performScrollTo().performClick()
+        composeRule.runOnIdle {
+            assertEquals("b".repeat(64), confirmedFingerprint)
+            assertEquals(2_500L, capturedEntries.single().amountCents)
+        }
+    }
+
     private fun assertCannotSave() {
         composeRule.onNodeWithTag("recognition-confirm").performScrollTo().assertIsNotEnabled()
         composeRule.runOnIdle { assertTrue(capturedEntries.isEmpty()) }
     }
 
-    private fun showCenter(events: List<RecognitionEvent>, entries: List<LedgerEntry> = emptyList()) {
+    private fun showCenter(events: List<RecognitionEvent>, entries: List<LedgerEntry> = emptyList(), narrowLargeFont: Boolean = false) {
         composeRule.setContent {
+            val density = if (narrowLargeFont) Density(composeRule.activity.resources.displayMetrics.widthPixels / 320f, fontScale = 2f)
+                else LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides density) {
             JizhangTheme {
                 RecognitionCenter(events = events, entries = entries, saving = false,
-                    onConfirm = { _, entry, remember, _, _ -> capturedEntries += entry; rememberedCategory = remember },
-                    onLink = { _, _ -> }, onIgnore = {}, onUndoIgnore = { restoredEvents += it },
-                    onUnlink = { unlinkedEvents += it }, onEditEntry = { editedEntries += it }, onDismiss = {})
+                    onConfirm = { event, entry, remember, separately, _ -> capturedEntries += entry; rememberedCategory = remember; confirmedFingerprint = event.candidate.eventFingerprint; separatelyConfirmed = separately },
+                    onLink = { _, _ -> }, onIgnore = {}, onUndoIgnore = { restoredEvents += it.id },
+                    onUnlink = { unlinkedEvents += it.id }, onEditEntry = { editedEntries += it }, onDismiss = {})
+            }
             }
         }
     }

@@ -109,8 +109,12 @@ object OcrReceiptLayoutParser {
         text == it || text.startsWith("$it：") || text.startsWith("$it:") || text.startsWith("$it ")
     }
     private fun normalizeLabel(text: String): String {
-        if (text.startsWith("转账全額") && (text.length == 5 || text.getOrNull(5) in listOf('：', ':', ' ')))
-            return "转账金额" + text.removePrefix("转账全額")
+        // Match the whole known label, not a hard-coded character offset. Keep every
+        // monetary character unchanged; longer words containing the alias are not fields.
+        val alias = listOf("转账全額", "转账全额").firstOrNull { spelling ->
+            text == spelling || text.startsWith("$spelling：") || text.startsWith("$spelling:") || text.startsWith("$spelling ")
+        }
+        if (alias != null) return "转账金额" + text.removePrefix(alias)
         val traditional = amountLabels.firstOrNull { label ->
             val spelling = label.replace("额", "額")
             text == spelling || text.startsWith("$spelling：") || text.startsWith("$spelling:") || text.startsWith("$spelling ")
