@@ -42,7 +42,7 @@
             android:name=".automation.ScreenCaptureService"
             android:label="轻记 · 屏幕记账"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>

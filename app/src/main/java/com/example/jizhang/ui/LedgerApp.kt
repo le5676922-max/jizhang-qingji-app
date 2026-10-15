@@ -4,6 +4,8 @@ import android.app.DatePickerDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -50,6 +52,9 @@ import com.example.jizhang.automation.PaymentNotificationListener
 import com.example.jizhang.automation.ScreenAccess
 import com.example.jizhang.automation.ScreenCaptureService
 import com.example.jizhang.automation.ScreenCaptureStatus
+import com.example.jizhang.automation.ScreenConnectionDiagnostics
+import com.example.jizhang.automation.ScreenServiceHealth
+import com.example.jizhang.automation.ScreenServiceHealthStore
 import com.example.jizhang.automation.ScreenCaptureMetrics
 import com.example.jizhang.automation.LocalTextRecognizer
 import com.example.jizhang.data.LedgerRepository
@@ -92,6 +97,7 @@ fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
     val listenerConnected by PaymentNotificationListener.connectionState.collectAsState()
     val captureError by repository.captureError.collectAsState()
     val screenConnected by ScreenCaptureService.connectionState.collectAsState()
+    val serviceHealth by ScreenCaptureService.lifecycleHealth.collectAsState()
     val screenStatus by ScreenCaptureService.status.collectAsState()
     val recognitionEvents by repository.recognitionEvents.collectAsState()
     val deletedEntries by repository.deletedEntries.collectAsState()
@@ -111,16 +117,36 @@ fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
     var recycleOpen by rememberSaveable { mutableStateOf(false) }
     var rulesOpen by rememberSaveable { mutableStateOf(false) }
     var granted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
-    var screenGranted by remember { mutableStateOf(ScreenAccess.isGranted(context)) }
+    var screenConnectionDiagnostics by remember { mutableStateOf(ScreenAccess.readConnectionDiagnostics(context, screenConnected)) }
+    val screenGranted = screenConnectionDiagnostics.granted == true
+    val healthStore = remember(context) { ScreenServiceHealthStore(context) }
+    var storedServiceHealth by remember { mutableStateOf(healthStore.read()) }
+    val recentServiceHealth = if (serviceHealth.changedAt >= storedServiceHealth.changedAt && serviceHealth.changedAt > 0) serviceHealth else storedServiceHealth
+    var connectionCheckedAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var connectionQueryGeneration by remember { mutableLongStateOf(0L) }
     var importingScreenshot by remember { mutableStateOf(false) }
     var screenshotSource by remember { mutableStateOf(EntrySource.WECHAT) }
     var screenshotGeneration by remember { mutableLongStateOf(-1L) }
+    fun checkScreenConnection() {
+        val generation = ++connectionQueryGeneration
+        scope.launch {
+            val snapshot = withContext(Dispatchers.IO) {
+                ScreenAccess.readConnectionDiagnostics(context, ScreenCaptureService.connectionState.value) to healthStore.read()
+            }
+            if (generation == connectionQueryGeneration) {
+                screenConnectionDiagnostics = snapshot.first.copy(localConnected = ScreenCaptureService.connectionState.value)
+                storedServiceHealth = snapshot.second
+                connectionCheckedAt = System.currentTimeMillis()
+            }
+        }
+    }
+    LaunchedEffect(screenConnected) { checkScreenConnection() }
     val lifecycleOwner = context as androidx.activity.ComponentActivity
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 granted = NotificationAccess.isGranted(context)
-                screenGranted = ScreenAccess.isGranted(context)
+                checkScreenConnection()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -257,6 +283,17 @@ fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
                     1 -> Bills(monthEntries, month, billFilter, onFilter = { billFilter = it }, onMonth = { month = shiftMonth(month, it) }, onEntry = { if (!saving && !importingScreenshot && !restoreBlocked) { editing = it; editorOpen = true } }, onReview = openReview,
                         onExport = { if (!saving && !importingScreenshot && !restoreBlocked) exportLauncher.launch("轻记账单-${dateText(System.currentTimeMillis(), "yyyyMMdd")}.csv") })
                     2 -> Automation(settings, granted, listenerConnected, captureError, screenGranted, screenConnected, screenStatus, importingScreenshot,
+                        screenConnectionDiagnostics = screenConnectionDiagnostics.copy(localConnected = screenConnected), serviceHealth = recentServiceHealth,
+                        onCheckScreenConnection = ::checkScreenConnection,
+                        onCopyScreenDiagnostics = {
+                            val diagnostic = screenConnectionDiagnostics.copy(localConnected = screenConnected)
+                            val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "未知"
+                            val report = "轻记连接诊断\n应用版本：$version\n设备：${android.os.Build.MANUFACTURER.take(80)} ${android.os.Build.MODEL.take(80)}\nAndroid API：${android.os.Build.VERSION.SDK_INT}\n系统授权：${diagnostic.granted}\n系统服务列表：${diagnostic.systemBound}\n轻记连接回调：${diagnostic.localConnected}\n最近生命周期：${recentServiceHealth.phase.label}\n生命周期时间：${recentServiceHealth.changedAt}\n上次连接时间：${recentServiceHealth.lastConnectedAt}\n配置兼容提示：${recentServiceHealth.configurationWarning}\n生命周期记录可读：${recentServiceHealth.readable}\n检查时间：${dateText(connectionCheckedAt, "yyyy-MM-dd HH:mm:ss")}"
+                            runCatching {
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("轻记连接诊断", report))
+                            }.onSuccess { scope.launch { snackbar.showSnackbar("连接诊断已复制，不包含账单或页面内容") } }
+                                .onFailure { scope.launch { snackbar.showSnackbar("无法复制诊断，请查看连接排查中的状态") } }
+                        },
                         events = recognitionEvents, diagnostics = diagnostics, metrics = screenMetrics, controlsEnabled = !saving && !importingScreenshot && !restoreBlocked,
                         onAppInfo = { runCatching { context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))) }.onFailure { scope.launch { snackbar.showSnackbar("请到系统设置的应用列表打开轻记详情") } } },
                         onBackgroundSettings = {
@@ -448,6 +485,8 @@ private fun Bills(entries: List<LedgerEntry>, month: Long, filter: Int, onFilter
 
 @Composable
 private fun Automation(settings: LedgerSettings, granted: Boolean, connected: Boolean, captureError: String?, screenGranted: Boolean, screenConnected: Boolean, screenStatus: ScreenCaptureStatus, importing: Boolean,
+                       screenConnectionDiagnostics: ScreenConnectionDiagnostics, serviceHealth: ScreenServiceHealth,
+                       onCheckScreenConnection: () -> Unit, onCopyScreenDiagnostics: () -> Unit,
                        events: List<RecognitionEvent>, diagnostics: List<RecognitionDiagnostic>, metrics: ScreenCaptureMetrics,
                        controlsEnabled: Boolean,
                        onAppInfo: () -> Unit, onBackgroundSettings: () -> Unit, onRecycle: () -> Unit, onRules: () -> Unit, backup: @Composable () -> Unit,
@@ -456,7 +495,9 @@ private fun Automation(settings: LedgerSettings, granted: Boolean, connected: Bo
     var testOpen by remember { mutableStateOf(false) }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Column { Text("自动记账", fontSize = 27.sp, fontWeight = FontWeight.Bold, color = Ink); Text("少一点操作，多一点生活", color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
-        ScreenControls(settings, screenGranted, screenConnected, screenStatus, importing, onSettings, onScreenAccess, onImportScreenshot, onReview, onAppInfo, enabled = controlsEnabled)
+        ScreenControls(settings, screenGranted, screenConnected, screenStatus, importing, onSettings, onScreenAccess, onImportScreenshot, onReview, onAppInfo, enabled = controlsEnabled,
+            connectionDiagnostics = screenConnectionDiagnostics, serviceHealth = serviceHealth, onCheckConnection = onCheckScreenConnection,
+            onBackgroundSettings = onBackgroundSettings, onCopyDiagnostics = onCopyScreenDiagnostics)
         DeviceCompatibilityCard(onBackgroundSettings)
         RecognitionDiagnostics(events, diagnostics, metrics)
         Surface(color = Green, shape = Round) {

@@ -12,6 +12,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.testTag
 import com.example.jizhang.automation.ScreenCaptureStatus
+import com.example.jizhang.automation.ScreenConnectionDiagnostics
+import com.example.jizhang.automation.ScreenConnectionState
+import com.example.jizhang.automation.ScreenServiceHealth
 import com.example.jizhang.data.LedgerSettings
 import com.example.jizhang.domain.EntrySource
 
@@ -19,10 +22,15 @@ import com.example.jizhang.domain.EntrySource
 internal fun ScreenControls(settings: LedgerSettings, granted: Boolean, connected: Boolean, status: ScreenCaptureStatus,
                             importing: Boolean, onSettings: (LedgerSettings) -> Unit, onAccess: () -> Unit,
                             onImport: (EntrySource) -> Unit, onReview: () -> Unit, onAppInfo: () -> Unit = {}, enabled: Boolean = true,
-                            sdk: Int = Build.VERSION.SDK_INT) {
+                            sdk: Int = Build.VERSION.SDK_INT, connectionDiagnostics: ScreenConnectionDiagnostics? = null,
+                            onCheckConnection: () -> Unit = {}, onBackgroundSettings: () -> Unit = {},
+                            onCopyDiagnostics: () -> Unit = {}, serviceHealth: ScreenServiceHealth? = null) {
     var disclosure by remember { mutableStateOf(false) }
     var ocrDisclosure by remember { mutableStateOf(false) }
     var sourcePicker by remember { mutableStateOf(false) }
+    var troubleshooting by remember { mutableStateOf(false) }
+    val connectionState = connectionDiagnostics?.state
+    val hasConnectionProblem = connectionState?.let { it != ScreenConnectionState.CONNECTED } ?: !connected
     Surface(color = Color.White, shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("屏幕记账", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
@@ -30,7 +38,15 @@ internal fun ScreenControls(settings: LedgerSettings, granted: Boolean, connecte
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("识别交易结果页", fontSize = 14.sp)
-                    Text(when { !settings.screenEnabled -> "默认关闭，开启后仅处理所选支付应用"; !granted -> "需要在系统设置中开启无障碍服务"; !connected -> "已授权，等待系统连接"; else -> "已连接 · 请在支付后停留于结果页" },
+                    Text(when {
+                        !settings.screenEnabled -> "默认关闭，开启后仅处理所选支付应用"
+                        connectionState == ScreenConnectionState.QUERY_UNAVAILABLE -> "暂时无法读取系统状态，请重新检查连接"
+                        !granted -> "需要在系统设置中开启无障碍服务"
+                        connectionState == ScreenConnectionState.AUTHORIZED_NOT_BOUND -> "已授权，系统尚未列出服务"
+                        connectionState == ScreenConnectionState.SYSTEM_BOUND_WAITING_CALLBACK -> "系统已列出服务，尚未收到连接回调"
+                        !connected -> "已授权，等待系统连接"
+                        else -> "已连接 · 请在支付后停留于结果页"
+                    }, modifier = Modifier.testTag("screen-connection-status"),
                         fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp)
                 }
                 Switch(settings.screenEnabled, enabled = enabled, modifier = Modifier.testTag("screen-enabled"), onCheckedChange = {
@@ -38,13 +54,38 @@ internal fun ScreenControls(settings: LedgerSettings, granted: Boolean, connecte
                 })
             }
             OutlinedButton(onClick = onAccess, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-                Text(if (granted) "管理无障碍服务" else "开启无障碍服务")
+                Text(if (connectionState == ScreenConnectionState.QUERY_UNAVAILABLE) "查看无障碍服务" else if (granted) "管理无障碍服务" else "开启无障碍服务")
             }
-            if (!granted) {
+            if (!granted && connectionState != ScreenConnectionState.QUERY_UNAVAILABLE) {
                 Text("系统若显示“由受限设置控制”，请打开轻记的应用信息，查找“允许受限设置”（部分系统位于右上角 ⋮ 菜单），再回到无障碍页面授权。入口名称随系统而不同，只有系统设置能解除该限制。", fontSize = 12.sp, lineHeight = 20.sp)
                 TextButton(onClick = onAppInfo, modifier = Modifier.testTag("screen-app-info")) { Text("打开轻记应用信息") }
-            } else if (!connected) {
-                Text("权限已经授权，服务尚未连接。可在系统设置关闭后重新开启；检查轻记是否被限制后台运行。", fontSize = 12.sp, lineHeight = 20.sp)
+            }
+            if (hasConnectionProblem) {
+                Text("请先核对下面的连接状态，无需再次付款测试。重新检查只读取当前状态，不更改系统设置。", fontSize = 12.sp, lineHeight = 20.sp)
+                OutlinedButton(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth().testTag("screen-check-connection")) { Text("重新检查连接") }
+                TextButton(onClick = { troubleshooting = !troubleshooting }, modifier = Modifier.testTag("screen-connection-help")) {
+                    Text(if (troubleshooting) "收起连接排查" else "连接排查")
+                }
+                if (troubleshooting) {
+                    connectionDiagnostics?.let { diagnostic ->
+                        Text("系统授权：${diagnostic.granted.diagnosticValue("已授权", "未授权")}", modifier = Modifier.testTag("screen-diagnostic-granted"), fontSize = 12.sp)
+                        Text("系统服务列表：${diagnostic.systemBound.diagnosticValue("已列出", "未列出")}", modifier = Modifier.testTag("screen-diagnostic-system"), fontSize = 12.sp)
+                        Text("轻记连接回调：${if (diagnostic.localConnected) "已收到" else "尚未收到"}", modifier = Modifier.testTag("screen-diagnostic-local"), fontSize = 12.sp)
+                        Text("系统服务列表仅供排查；轻记收到连接回调后才会开始识别。", fontSize = 11.sp, lineHeight = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    serviceHealth?.let { health ->
+                        Text(if (!health.readable) "历史连接记录：暂时无法读取" else "历史连接记录：${health.phase.label}", modifier = Modifier.testTag("screen-diagnostic-history"), fontSize = 12.sp)
+                        if (health.lastConnectedAt > 0) Text("上次连接：${java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(health.lastConnectedAt))}（历史记录）", fontSize = 11.sp)
+                        if (health.configurationWarning) Text("上次配置检查未完成；请保留诊断信息反馈。", fontSize = 11.sp)
+                        Text("历史连接记录不代表服务当前已连接。", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text("1. 打开无障碍设置，确认“轻记 · 屏幕记账”已开启。若已关闭后重新开启仍无连接，请继续检查下方设置，无需重复付款。\n2. 打开轻记应用信息，查看系统是否提示受限设置；若有“允许受限设置”，由你决定是否允许。\n3. 检查轻记的电池与后台运行限制。三星可查看电池设置中的休眠应用列表，确认轻记未被放入深度休眠。\n4. 返回轻记点“重新检查连接”。仍未连接时可重启手机，再复制诊断信息反馈。", fontSize = 12.sp, lineHeight = 20.sp)
+                    OutlinedButton(onClick = onAccess, modifier = Modifier.fillMaxWidth().testTag("screen-help-access")) { Text("打开无障碍系统设置") }
+                    OutlinedButton(onClick = onAppInfo, modifier = Modifier.fillMaxWidth().testTag("screen-help-app-info")) { Text("查看轻记应用信息") }
+                    OutlinedButton(onClick = onBackgroundSettings, modifier = Modifier.fillMaxWidth().testTag("screen-help-background")) { Text("检查后台运行设置") }
+                    TextButton(onClick = onCopyDiagnostics, modifier = Modifier.testTag("screen-copy-diagnostics")) { Text("复制连接诊断") }
+                    Text("诊断只包含轻记的版本、设备系统及自身服务状态，不包含账单、截图或其他应用列表。", fontSize = 11.sp, lineHeight = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             HorizontalDivider()
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -85,4 +126,10 @@ internal fun ScreenControls(settings: LedgerSettings, granted: Boolean, connecte
         text = { Text("请选择转账、红包或付款结果截图。文字识别仅在设备上处理，账单先保存为待确认。") },
         confirmButton = { TextButton(onClick = { sourcePicker = false; onImport(EntrySource.WECHAT) }, enabled = enabled) { Text("微信") } },
         dismissButton = { TextButton(onClick = { sourcePicker = false; onImport(EntrySource.ALIPAY) }, enabled = enabled) { Text("支付宝") } })
+}
+
+private fun Boolean?.diagnosticValue(yes: String, no: String): String = when (this) {
+    true -> yes
+    false -> no
+    null -> "查询不可用"
 }

@@ -60,6 +60,7 @@ class ScreenCaptureService : AccessibilityService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val events = Channel<WindowEvent>(Channel.CONFLATED)
     private lateinit var repository: LedgerRepository
+    private lateinit var healthStore: ScreenServiceHealthStore
     // Main-thread accessibility callbacks replace the whole tuple. The IO collector must
     // never combine a previous Activity with a later package/window/session.
     @Volatile private var foregroundFrame = ForegroundEpoch()
@@ -73,6 +74,9 @@ class ScreenCaptureService : AccessibilityService() {
 
     override fun onCreate() {
         super.onCreate()
+        mutableConnectionState.value = false
+        healthStore = ScreenServiceHealthStore(applicationContext)
+        recordHealth(ScreenServicePhase.CREATED)
         repository = LedgerRepository.get(applicationContext)
         scope.launch {
             repository.restoreBlocked.collect { blocked ->
@@ -117,9 +121,19 @@ class ScreenCaptureService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         invalidateForegroundEpoch()
-        // XML sets the same allowlist; keep it explicit even after a future settings change.
-        serviceInfo = serviceInfo.apply { packageNames = ScreenCapturePolicy.SUPPORTED_PACKAGES.toTypedArray() }
+        // The system has actually bound us. A defensive runtime refinement must not
+        // crash this callback and leave the UI waiting forever. XML and every event /
+        // root check independently enforce the exact same payment package allowlist.
         mutableConnectionState.value = true
+        val configured = try {
+            val currentInfo = serviceInfo
+            if (currentInfo == null) false else {
+                currentInfo.packageNames = ScreenCapturePolicy.SUPPORTED_PACKAGES.toTypedArray()
+                serviceInfo = currentInfo
+                true
+            }
+        } catch (_: Exception) { false }
+        recordHealth(ScreenServicePhase.CONNECTED, configurationWarning = !configured)
         publish(if (repository.settings.value.screenEnabled) "已连接，等待微信或支付宝的付款结果页" else "屏幕识别已关闭")
     }
 
@@ -743,9 +757,14 @@ class ScreenCaptureService : AccessibilityService() {
         mutableStatus.value = ScreenCaptureStatus(message, System.currentTimeMillis(), source)
     }
 
+    private fun recordHealth(phase: ScreenServicePhase, configurationWarning: Boolean? = null) {
+        if (::healthStore.isInitialized) mutableLifecycleHealth.value = healthStore.record(phase, configurationWarning)
+    }
+
     override fun onInterrupt() {
         invalidateForegroundEpoch()
         cancelOcrRetry()
+        recordHealth(ScreenServicePhase.INTERRUPTED)
         publish("屏幕识别被系统暂时中断，请检查无障碍服务")
     }
 
@@ -753,6 +772,7 @@ class ScreenCaptureService : AccessibilityService() {
         invalidateForegroundEpoch()
         cancelOcrRetry()
         mutableConnectionState.value = false
+        recordHealth(ScreenServicePhase.UNBOUND)
         publish("无障碍服务已断开")
         return super.onUnbind(intent)
     }
@@ -761,6 +781,7 @@ class ScreenCaptureService : AccessibilityService() {
         invalidateForegroundEpoch()
         cancelOcrRetry()
         mutableConnectionState.value = false
+        recordHealth(ScreenServicePhase.DESTROYED)
         events.close()
         scope.cancel()
         publish("无障碍服务已断开")
@@ -808,6 +829,8 @@ class ScreenCaptureService : AccessibilityService() {
         )
         private val mutableConnectionState = MutableStateFlow(false)
         val connectionState: StateFlow<Boolean> = mutableConnectionState.asStateFlow()
+        private val mutableLifecycleHealth = MutableStateFlow(ScreenServiceHealth())
+        val lifecycleHealth: StateFlow<ScreenServiceHealth> = mutableLifecycleHealth.asStateFlow()
         private val mutableStatus = MutableStateFlow(ScreenCaptureStatus("屏幕识别尚未连接"))
         val status: StateFlow<ScreenCaptureStatus> = mutableStatus.asStateFlow()
         private val mutableMetrics = MutableStateFlow(ScreenCaptureMetrics())

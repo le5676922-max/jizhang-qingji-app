@@ -1,6 +1,8 @@
 # 轻记 · Android 本地自动记账
 
-当前源码为 **2.0 测试版**（`versionName 2.0`、`versionCode 3`）。通知、页面文字、本地 OCR、识别中心与完整备份恢复已接通；产品构建和 **199 项 JVM 单元测试**已通过。API 24 与 API 37 的 **124 项设备测试分别全量通过**，合成通知、页面节点与 OCR 的端到端账本及实际 SAF 完整恢复核验通过。API 35／16 KB 分段各项通过，长进程崩溃限制见验证报告。
+**2.0.1 连接诊断测试版**（`versionName 2.0.1`、`versionCode 4`）：[发布入口与匹配源码](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0.1-test)，资产名 `qingji-v2.0.1.apk`。针对「已授权，等待系统连接」增加只读状态检查、连接排查和可复制诊断；**三星 S23 Ultra 上的真实根因尚未确定，不能保证升级后连接恢复**。205 项 JVM、API 24 全部 135 项设备测试、API 37 的 16 项连接相关测试均通过；APK 签名与校验已核验，详见 [连接排查与本版验证](docs/connection-troubleshooting.md)。覆盖安装前先备份，保留原应用数据，无需反复付款测试。
+
+以下保留 **2.0 测试版的历史基线**（`versionName 2.0`、`versionCode 3`）。通知、页面文字、本地 OCR、识别中心与完整备份恢复已接通；产品构建和 **199 项 JVM 单元测试**已通过。API 24 与 API 37 的 **124 项设备测试分别全量通过**，合成通知、页面节点与 OCR 的端到端账本及实际 SAF 完整恢复核验通过。API 35／16 KB 分段各项通过，长进程崩溃限制见验证报告。
 
 安装包与匹配源码入口为 [2.0 测试版发布页](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0-test)，对应标签 `v2.0-test`、资产 `qingji-v2.0.apk`。此前 `initial-public-snapshot` 保存的是开发快照，随附 1.1 APK 与本次 2.0 不同。当前验证状态见 [开发状态](docs/development-status.md)。
 
