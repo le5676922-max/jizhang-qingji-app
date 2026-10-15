@@ -2,6 +2,8 @@
 
 调研日期：2026-10-13（Asia/Shanghai）。本报告读取 GitHub 固定提交的完整源码及 Android / Google 官方文档；未复制参考项目实现，未对用户手机上的微信、支付宝进行实机验证。
 
+这是屏幕识别路线的历史调研。2.1 新增用户主动调用的 [DeepSeek 助手](deepseek-agent.md)，与此处自动采集通道分开；旧版权限及验证结论不替代本轮实现。
+
 用户已确认微信、支付宝的转账和红包操作没有发出系统通知。通知监听无法补出不存在的通知，应增加独立的屏幕识别通道。可行方案为用户主动启用的无障碍服务读取支付结果页节点，节点不足时使用正常截图与设备端中文 OCR；不依赖 Root、Xposed 或修改支付应用。
 
 ## GitHub 源码证据
@@ -48,7 +50,7 @@ Android 34+ 可将标记为敏感的节点对非助残服务隐藏，见 [Access
 
 截至调研日，[ML Kit Android 官方接入文档](https://developers.google.com/ml-kit/vision/text-recognition/v2/android) 给出的捆绑中文依赖为 `com.google.mlkit:text-recognition-chinese:16.0.1`，最低 API 23，使用 `ChineseTextRecognizerOptions`。模型随 APK 分发，首次识别不等待 Play Services 下载；本项目 minSdk 24 满足库要求。输出包含文字块、行、元素与边框，可据位置把“金额/收款方/付款方”标签关联到对应值，不能把整张图中的最大数值默认当交易金额。
 
-[ML Kit 官方隐私说明](https://developers.google.com/ml-kit/terms#privacy) 明确图像、文字和识别结果在设备端处理，不传给 Google 服务器；同时 SDK 可能发送性能/使用指标、请求更新与兼容性信息。因此对用户说明“账单截图与识别结果不上传”，不要承诺第三方 SDK 绝无网络通讯。轻记自己的账单通道不接入云端识别、AI接口或远程日志。
+[ML Kit 官方隐私说明](https://developers.google.com/ml-kit/terms#privacy) 明确图像、文字和识别结果在设备端处理，不传给 Google 服务器；同时 SDK 可能发送性能/使用指标、请求更新与兼容性信息。因此对用户说明“账单截图与识别结果不上传”，不要承诺第三方 SDK 绝无网络通讯。本文研究的自动账单采集通道不接入云端识别、AI 接口或远程日志；2.1 的主动助手网络与数据授权另见新指南。
 
 ## 独立实现建议
 

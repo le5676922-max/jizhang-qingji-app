@@ -62,6 +62,11 @@ import com.example.jizhang.data.LedgerSettings
 import com.example.jizhang.data.RecognitionEvent
 import com.example.jizhang.data.RecognitionDiagnostic
 import com.example.jizhang.data.MerchantCategoryRule
+import com.example.jizhang.agent.AgentReply
+import com.example.jizhang.agent.AgentConnectionSnapshot
+import com.example.jizhang.agent.AgentLedgerSnapshot
+import com.example.jizhang.agent.DeepSeekLedgerAgent
+import com.example.jizhang.agent.agentSnapshot
 import com.example.jizhang.recognition.CandidateFactory
 import com.example.jizhang.recognition.EvidenceType
 import com.example.jizhang.recognition.RecognitionDecision
@@ -87,9 +92,13 @@ private val Pale = Color(0xFFE9EEE2)
 private val Round = RoundedCornerShape(24.dp)
 
 @Composable
-fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
+fun LedgerApp(
+    repositoryOverride: LedgerRepository? = null,
+    agentRequestOverride: (suspend (String, AgentLedgerSnapshot, Boolean) -> AgentReply)? = null,
+) {
     val context = LocalContext.current
     val repository = remember(repositoryOverride) { repositoryOverride ?: LedgerRepository.get(context) }
+    val ledgerAgent = remember(context) { DeepSeekLedgerAgent(context) }
     val entries by repository.entries.collectAsState()
     val settings by repository.settings.collectAsState()
     val storageError by repository.storageError.collectAsState()
@@ -235,7 +244,7 @@ fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
-            if (tab != 2) FloatingActionButton(
+            if (tab in 0..1) FloatingActionButton(
                 onClick = { if (!restoreBlocked && !saving && !importingScreenshot) { editing = null; editorOpen = true } },
                 containerColor = Green, contentColor = Color.White, shape = RoundedCornerShape(20.dp)
             ) { Row(Modifier.padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -244,9 +253,9 @@ fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
         },
         bottomBar = {
             NavigationBar(containerColor = Color.White, tonalElevation = 0.dp) {
-                listOf("概览", "账单", "自动记账").forEachIndexed { index, label ->
+                listOf("概览", "账单", "自动记账", "助手").forEachIndexed { index, label ->
                     NavigationBarItem(selected = tab == index, onClick = { tab = index },
-                        icon = { Glyph(listOf("chart", "ledger", "auto")[index], if (tab == index) Green else Muted, Modifier.size(23.dp)) },
+                        icon = { Glyph(listOf("chart", "ledger", "auto", "auto")[index], if (tab == index) Green else Muted, Modifier.size(23.dp)) },
                         label = { Text(label) }, colors = NavigationBarItemDefaults.colors(indicatorColor = Pale))
                 }
             }
@@ -315,6 +324,40 @@ fun LedgerApp(repositoryOverride: LedgerRepository? = null) {
                                 .onFailure { scope.launch { snackbar.showSnackbar("请在系统设置中搜索“通知使用权”") } }
                         }
                     })
+                    3 -> AgentPanel(
+                        writingBlocked = saving || importingScreenshot || restoreBlocked,
+                        onAsk = { prompt, shareSummary ->
+                            // Snapshot at submission, not at tab composition. No deleted rows, raw
+                            // screen text, notification bodies or captured images enter the agent.
+                            if (repository.restoreBlocked.value) AgentReply("账本正在初始化或恢复，请完成后重新查询。")
+                            else {
+                                val snapshot = withContext(Dispatchers.IO) {
+                                    val currentSettings = repository.settings.value
+                                    agentSnapshot(repository.entries.value.toList(), repository.recognitionEvents.value.toList(),
+                                        AgentConnectionSnapshot(
+                                            notificationAuthorized = runCatching { NotificationAccess.isGranted(context) }.getOrNull(),
+                                            notificationConnected = PaymentNotificationListener.connectionState.value,
+                                            screenAuthorized = ScreenAccess.readConnectionDiagnostics(context, ScreenCaptureService.connectionState.value).granted,
+                                            screenConnected = ScreenCaptureService.connectionState.value,
+                                            autoEnabled = currentSettings.autoEnabled,
+                                            screenEnabled = currentSettings.screenEnabled,
+                                            ocrEnabled = currentSettings.screenOcrEnabled,
+                                        ))
+                                }
+                                agentRequestOverride?.invoke(prompt, snapshot, shareSummary)
+                                    ?: ledgerAgent.ask(prompt, snapshot, shareSummary)
+                            }
+                        },
+                        onDraft = { draft ->
+                            if (!saving && !importingScreenshot && !restoreBlocked) {
+                                editing = draft.copy(id = 0L, source = EntrySource.MANUAL, fingerprint = null,
+                                    needsReview = false, relatedEntryId = null)
+                                editorOpen = true
+                            }
+                        },
+                        onReview = openReview,
+                        onConnection = { tab = 2 },
+                    )
                 }
             }
         }
@@ -541,7 +584,7 @@ private fun Automation(settings: LedgerSettings, granted: Boolean, connected: Bo
         }
         Panel {
             Row(verticalAlignment = Alignment.CenterVertically) { Glyph("shield", Green, Modifier.size(22.dp)); Spacer(Modifier.width(8.dp)); Text("你的账单，只在你的设备", fontWeight = FontWeight.SemiBold, color = Ink, fontSize = 14.sp) }
-            Text("无需登录，不上传账单，不保存完整通知、页面文字或截图。仅处理勾选的两个应用；可随时关闭开关或撤销授权。", color = Muted, fontSize = 12.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 12.dp))
+            Text("通知与屏幕识别在本机处理，不保存完整通知、页面文字或截图；仅处理勾选的两个应用，可随时关闭或撤销授权。DeepSeek 由助手中的主动发送触发，汇总共享需本次单独勾选。ML Kit 可能联网发送 SDK 性能与设备诊断信息。", color = Muted, fontSize = 12.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 12.dp))
             Text("部分 Android 版本会隐藏敏感通知；系统省电策略或应用通知设置也可能影响识别。已发生且未收到通知的交易不会自动补回。", color = Muted, fontSize = 12.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 10.dp))
         }
         OutlinedButton(onClick = { testOpen = true }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) { Text("试试通知识别") }
@@ -678,7 +721,7 @@ private fun EntryEditor(entry: LedgerEntry?, allEntries: List<LedgerEntry>, even
         Surface(shape = Round, color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxWidth().heightIn(max = 680.dp).verticalScroll(rememberScrollState()).padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (entry == null) "记一笔" else if (entry.needsReview) "确认账单" else "编辑账单", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text(if (entry == null || entry.id == 0L) "记一笔" else if (entry.needsReview) "确认账单" else "编辑账单", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.weight(1f)); TextButton(onClick = onDismiss, contentPadding = PaddingValues(0.dp)) { Text("关闭") }
                 }
                 Text("这笔资金的用途", color = Muted, fontSize = 12.sp)
@@ -723,8 +766,8 @@ private fun EntryEditor(entry: LedgerEntry?, allEntries: List<LedgerEntry>, even
                     }
                 }
                 if (existingRefunds > 0) Text("已有 ¥${Money.format(existingRefunds)} 退款关联，原消费金额不能低于该金额。", color = Orange, style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(merchant, onValueChange = { if (it.length <= 120) merchant = it }, label = { Text("商户 / 对方（选填）") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
-                OutlinedTextField(note, onValueChange = { if (it.length <= 500) note = it }, label = { Text("备注（选填）") }, maxLines = 3, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+                OutlinedTextField(merchant, onValueChange = { if (it.length <= 200) merchant = it }, label = { Text("商户 / 对方（选填）") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+                OutlinedTextField(note, onValueChange = { if (it.length <= 2000) note = it }, label = { Text("备注（选填）") }, maxLines = 3, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
                 TextButton(onClick = {
                     val calendar = Calendar.getInstance().apply { timeInMillis = occurredAt }
                     DatePickerDialog(context, { _, year, month, day ->
@@ -751,11 +794,11 @@ private fun EntryEditor(entry: LedgerEntry?, allEntries: List<LedgerEntry>, even
                             fingerprint = entry?.fingerprint, needsReview = false), rememberCategory && merchant.isNotBlank() && business in setOf(BusinessType.EXPENSE, BusinessType.INCOME))
                 }, enabled = !saving && business != BusinessType.UNKNOWN && (business != BusinessType.REFUND || refundValid),
                     modifier = Modifier.fillMaxWidth().testTag("entry-save"), shape = RoundedCornerShape(14.dp)) { Text(if (saving) "保存中…" else if (entry?.needsReview == true) "确认并保存" else "保存账单") }
-                if (entry != null) TextButton(onClick = { deleting = true }, enabled = !saving, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("删除这笔账单", color = Orange) }
+                if (entry != null && entry.id != 0L) TextButton(onClick = { deleting = true }, enabled = !saving, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("删除这笔账单", color = Orange) }
             }
         }
     }
-    if (deleting && entry != null) AlertDialog(onDismissRequest = { deleting = false }, title = { Text("删除这笔账单？") }, text = { Text("账单会移入回收站并从统计中移除；可在回收站恢复。已有识别来源会保留，通知更新不会把账单重新计入。") },
+    if (deleting && entry != null && entry.id != 0L) AlertDialog(onDismissRequest = { deleting = false }, title = { Text("删除这笔账单？") }, text = { Text("账单会移入回收站并从统计中移除；可在回收站恢复。已有识别来源会保留，通知更新不会把账单重新计入。") },
         confirmButton = { TextButton(onClick = { deleting = false; onDelete(entry.id) }) { Text("删除", color = Orange) } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text("取消") } })
 }
 

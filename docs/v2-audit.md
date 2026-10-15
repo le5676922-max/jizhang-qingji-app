@@ -1,5 +1,7 @@
 # V2.0 阶段审计与实施记录
 
+本页为 2.0 改造各阶段的历史记录；下文“当前工作区”“无网络权限”及通过数量均对应当时阶段，不指后续 2.1 DeepSeek 工作树。新接入与权限边界见 [DeepSeek 指南](deepseek-agent.md)。
+
 ## Phase 1：实际基线
 
 当前工作区已是轻记1.1，而不是仅通知版本1.0。现有Kotlin、Compose、Material3、SQLiteOpenHelper、AGP9.4.1、Kotlin2.2.10、Compose BOM2025.12.00、API24最低版本保留，不重建工程。

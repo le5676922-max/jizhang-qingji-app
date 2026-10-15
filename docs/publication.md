@@ -42,7 +42,7 @@ CD7FD5662B425D73F306E61A7E78441D3174E05A29885528BA70F66661DECE4D
 
 2026-10-15 的交付文件为 `qingji-v2.0.apk`，57,543,659 字节，SHA-256 为 `4681BA82C750AA838B51DAA7CFE9D16AFD2FAC1DB80DF1AD43C268797BE2741D`。它由本次 V2 源码构建，使用与此前 1.1 相同的发布者 Debug 证书；对应标签及资产入口为 [v2.0-test](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0-test)。
 
-产品无网络权限，四种 ABI、API 24 起分级能力、旧账迁移、统一识别、退款去重与完整加密恢复已实现。199 项 JVM 通过，API 24 与 API 37 均有 124 项全量通过记录；各系统实际设备测试、端到端、SAF 恢复与 16KB 原生运行的已知限制以 [本次验证报告](verification.md) 和 [兼容说明](android-compatibility.md) 为准。不将测试覆盖等同所有品牌真机认证。
+该 2.0 产品无网络权限，四种 ABI、API 24 起分级能力、旧账迁移、统一识别、退款去重与完整加密恢复已实现。199 项 JVM 通过，API 24 与 API 37 均有 124 项全量通过记录；各系统实际设备测试、端到端、SAF 恢复与 16KB 原生运行的已知限制以 [该版验证报告](verification.md) 和 [兼容说明](android-compatibility.md) 为准。不将测试覆盖等同所有品牌真机认证。
 
 
 ## 2.0.1 连接诊断测试版
@@ -50,3 +50,9 @@ CD7FD5662B425D73F306E61A7E78441D3174E05A29885528BA70F66661DECE4D
 本版对应 v2.0.1-test、versionName 2.0.1／versionCode 4，安装包 qingji-v2.0.1.apk 为 57,868,874 字节，SHA-256：785109AC407989260CC97A003F1C31085A2187CC29E8C0938F407CFA585D2A99。与此前发布者签名一致；匹配源码、安装说明和 APK 入口为 [2.0.1 测试版](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0.1-test)。
 
 针对三星真机一直等待连接新增只读状态、生命周期诊断及初始化兼容处理，尚未查明真机根因，也未声称识别或连接已在该手机恢复。205 项 JVM、API 24 完整 135 项设备及 API 37 的 16 项连接相关测试通过，具体范围与原始文件名见 [本版报告](connection-troubleshooting.md)。历史 2.0 资产保留。
+
+## 2.1 DeepSeek 助手测试版
+
+本版为 versionName 2.1／versionCode 5，资产 `qingji-v2.1.apk`，58,036,399 字节，SHA-256：`F35C3025F17EAF6E67289CBC9F5EFBC1430F2A9D62085EC17006DB5283F0676F`。同发布者 Debug 签名，APK v2 与 16 KB ZIP 对齐核验通过；[安装包、说明及匹配源码](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.1-test)。
+
+新增 DeepSeek 助手、四个受限本地工具、AndroidKeyStore 加密密钥及网络权限。229 项 JVM 测试通过，API 24 和 API 37 各 193 项完整设备测试通过。协议、密钥及界面用合成数据验证，未使用真实付费 Key 请求正式 DeepSeek API；真机连接问题仍待诊断。[验证记录](verification-deepseek-v2.1.md)、[配置及隐私边界](deepseek-agent.md)列出实际范围。2.0／2.0.1 的无网络权限仅是对应历史包的事实。

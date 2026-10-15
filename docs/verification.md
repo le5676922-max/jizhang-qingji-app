@@ -1,6 +1,6 @@
 # 轻记 2.0 测试版验证记录
 
-更新日期：2026-10-15（Asia/Shanghai）。本报告记录当前 V2 工作树和对应本机 APK 的实际验证；[通知版 1.0](verification-notification-v1.md) 与 [屏幕版 1.1](verification-screen.md) 的历史数量不能替代本次结果。原始日志、数据库快照、系统截图与测试备份保存在本机被 Git 忽略的 `docs/evidence/`、`docs/screenshots/`，未作为公开仓库附件上传；下文保留文件名便于复核。
+更新日期：2026-10-15（Asia/Shanghai）。本报告记录 **2.0 发布源码与对应本机 APK** 的实际验证，不是后续 2.0.1 或 2.1 的验证报告；[通知版 1.0](verification-notification-v1.md) 与 [屏幕版 1.1](verification-screen.md) 的历史数量也不能替代本次结果。2.1 DeepSeek 开发边界另见 [接入指南](deepseek-agent.md)。原始日志、数据库快照、系统截图与测试备份保存在本机被 Git 忽略的 `docs/evidence/`、`docs/screenshots/`，未作为公开仓库附件上传；下文保留文件名便于复核。
 
 ## 当前结果
 

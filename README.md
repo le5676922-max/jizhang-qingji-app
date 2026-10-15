@@ -1,14 +1,20 @@
-# 轻记 · Android 本地自动记账
+# 轻记 · Android 自动记账与 DeepSeek 助手
 
-**2.0.1 连接诊断测试版**（`versionName 2.0.1`、`versionCode 4`）：[发布入口与匹配源码](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0.1-test)，资产名 `qingji-v2.0.1.apk`。针对「已授权，等待系统连接」增加只读状态检查、连接排查和可复制诊断；**三星 S23 Ultra 上的真实根因尚未确定，不能保证升级后连接恢复**。205 项 JVM、API 24 全部 135 项设备测试、API 37 的 16 项连接相关测试均通过；APK 签名与校验已核验，详见 [连接排查与本版验证](docs/connection-troubleshooting.md)。覆盖安装前先备份，保留原应用数据，无需反复付款测试。
+**最新交付：2.1 DeepSeek 记账助手测试版**（`versionName 2.1`、`versionCode 5`）。[下载 APK 与匹配源码](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.1-test)，资产名 `qingji-v2.1.apk`。新增底部「助手」：自行配置 API Key，主动发送自然语言需求，由四个本地工具校验草稿、计算收支、解释待确认及检查连接；草稿需在原编辑器核对保存。默认不附账本汇总，单次授权和计费见 [DeepSeek 配置指南](docs/deepseek-agent.md)。229 项 JVM 测试通过，API 24 与 API 37 各 193 项设备测试全量通过；真实付费 API 调用仍需本人 Key 验证。APK 校验值、失败记录及范围见 [2.1 验证报告](docs/verification-deepseek-v2.1.md)。
+
+**历史交付：2.0.1 连接诊断测试版**（`versionName 2.0.1`、`versionCode 4`）：[发布入口与匹配源码](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0.1-test)，资产名 `qingji-v2.0.1.apk`。针对「已授权，等待系统连接」增加只读状态检查、连接排查和可复制诊断；**三星 S23 Ultra 上的真实根因尚未确定，不能保证升级后连接恢复**。该版 205 项 JVM、API 24 全部 135 项设备测试、API 37 的 16 项连接相关测试均通过；APK 签名与校验已核验，详见 [连接排查与该版验证](docs/connection-troubleshooting.md)。覆盖安装前先备份，保留原应用数据，无需反复付款测试。
 
 以下保留 **2.0 测试版的历史基线**（`versionName 2.0`、`versionCode 3`）。通知、页面文字、本地 OCR、识别中心与完整备份恢复已接通；产品构建和 **199 项 JVM 单元测试**已通过。API 24 与 API 37 的 **124 项设备测试分别全量通过**，合成通知、页面节点与 OCR 的端到端账本及实际 SAF 完整恢复核验通过。API 35／16 KB 分段各项通过，长进程崩溃限制见验证报告。
 
-安装包与匹配源码入口为 [2.0 测试版发布页](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0-test)，对应标签 `v2.0-test`、资产 `qingji-v2.0.apk`。此前 `initial-public-snapshot` 保存的是开发快照，随附 1.1 APK 与本次 2.0 不同。当前验证状态见 [开发状态](docs/development-status.md)。
+历史安装包与匹配源码入口为 [2.0 测试版发布页](https://github.com/le5676922-max/jizhang-qingji-app/releases/tag/v2.0-test)，对应标签 `v2.0-test`、资产 `qingji-v2.0.apk`。此前 `initial-public-snapshot` 保存的是开发快照，随附 1.1 APK 与 2.0 不同。版本作用域见 [开发状态](docs/development-status.md)。
 
 应用使用 Kotlin、Jetpack Compose、Material 3 和本机 SQLite。最低 Android 7.0（API 24），打包四种 CPU ABI，不限定手机品牌；根据系统能力提供通知、页面文字或截图识别。自动截图需要 Android 11（API 30）以上；中文 OCR 模型捆绑在应用内，无需账号或云识别服务。三星 S23 Ultra 满足 API 要求，但真实手机、当前微信和支付宝页面覆盖尚未验证；不能将模拟器通过写成“所有型号均已适配”。
 
-## 2.0 已接通的功能
+## 记账助手与本地账本
+
+2.1 的 DeepSeek 集成与已有自动识别分开运行：通知、页面文字与 OCR 不会自动调用模型。未启用 DeepSeek 时，可使用固定的本地查询短语；启用后点击「发送给 DeepSeek」才触发本项目的模型请求。每次请求独立，页面中的聊天历史不作为后续模型上下文。AI 建议中的数字以本地工具核算为准，模型不能直接保存、删除、确认账单或改变系统权限。
+
+本轮保留的 2.0 本地功能：
 
 - **三个识别入口**：微信、支付宝的新支付服务通知；已打开的单笔交易结果／详情页文字；符合安全条件的本地 OCR。也可主动导入支付截图，图片候选必须确认后入账。
 - **智能识别中心**：来源事件与正式账单分开。待确认不增加统计；可核对类型、方向、实际金额、日期和分类，确认新账单、关联已有账单、忽略、恢复待确认及撤销关联。已关联的冲突凭据确认时会明确提示修改已有账单。
@@ -23,7 +29,7 @@
 
 ## 安装与系统权限设置
 
-从发布页下载 `qingji-v2.0.apk`。文件名必须以 `.apk` 结尾；若下载后变成 `.apk.1`，先删除末尾 `.1`，再通过系统文件管理器打开，并按系统提示允许该来源安装。旧账会随数据库升级迁移；卸载或清除应用数据会删除本机账本，请先保留导出或备份。
+从上方 2.1 发布页下载 `qingji-v2.1.apk`，该包包含 DeepSeek 助手和原有连接诊断。文件名必须以 `.apk` 结尾；若下载后变成 `.apk.1`，先删除末尾 `.1`，再通过系统文件管理器打开，并按系统提示允许该来源安装。旧账会随数据库升级迁移；卸载或清除应用数据会删除本机账本，请先保留导出或备份。
 
 1. 打开轻记的「自动记账」→「屏幕记账」，开启「识别交易结果页」，阅读并同意用途说明。
 2. 若显示「由受限设置控制」，通过应用提供的「打开轻记应用信息」入口进入系统应用信息，允许受限设置，再授权服务。三星常见路径是 **设置 → 应用 → 轻记 → 右上角 ⋮ → 允许受限设置**；其他品牌的名称和位置可能不同。该选项是否显示取决于系统版本与安装来源，应用不能自行解除限制。
@@ -49,7 +55,11 @@
 
 ## 本地数据与备份
 
-主 App 不声明 `INTERNET` 或 `ACCESS_NETWORK_STATE` 权限，不上传账本、原图或识别文字。无障碍只读取所选支付来源，不点击、不输入、不支付；用户可关闭开关或撤销系统授权。截图和 OCR 原文仅在有界内存中使用；持久化提取字段、金额候选、固定说明和哈希身份，不保存完整通知、页面转储、单号原文或图片。
+2.0／2.0.1 发布包不声明 `INTERNET` 或 `ACCESS_NETWORK_STATE`。2.1 为 DeepSeek 声明网络权限：本项目只在用户主动发送时调用固定官方 API，默认发送本次输入；本次单独勾选后，才可附收支汇总、固定分类与待确认数量和原因计数，不自动附逐笔账单、通知正文、截图或 OCR 原文。API Key 在手机应用设置中输入，由 AndroidKeyStore 保护的密钥加密保存，不写入财务备份。
+
+中文 OCR 仍在设备端运行。拥有网络权限后，ML Kit 可能按官方说明发送性能、使用与设备等 SDK 诊断指标，不能承诺整个应用绝无后台网络；官方说明输入图片及识别输出在设备端处理，不发送到 Google 服务器。[ML Kit 隐私说明](https://developers.google.com/ml-kit/terms#privacy)；具体 SDK 指标见 [Google 数据披露](https://developers.google.com/ml-kit/android-data-disclosure)。
+
+无障碍只读取所选支付来源，不点击、不输入、不支付；用户可关闭开关或撤销系统授权。截图和 OCR 原文仅在有界内存中使用；持久化提取字段、金额候选、固定说明和哈希身份，不保存完整通知、页面转储、单号原文或图片。
 
 完整备份的新密码至少 8 个字符，需重复输入一致；密码不保存、无法找回。预览或取消不修改账本，确认恢复才替换。恢复成功保留预算及支付来源选择，**通知、屏幕及自动 OCR 三个开关关闭**；系统权限不从备份恢复。初始化或恢复失败时，采集与修改暂停，可明确重试。
 
@@ -57,14 +67,14 @@
 
 ## 开发与验证范围
 
-工程保留原 Android 构建框架，按 `domain`、`recognition`、`data`、`automation`、`ui` 组织；中文模型依赖为官方 `com.google.mlkit:text-recognition-chinese:16.0.1`。
+工程保留原 Android 构建框架，按 `domain`、`recognition`、`data`、`automation`、`agent`、`ui` 组织；中文模型依赖为官方 `com.google.mlkit:text-recognition-chinese:16.0.1`。2.1 新增实现的验证状态单独记录，以下是 2.0 历史结果。
 
 ```powershell
 .\gradlew.bat :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug
 .\gradlew.bat :app:connectedDebugAndroidTest
 ```
 
-- 当前产品构建成功，用时 **3 分 42 秒**；**199 项 JVM 单元测试通过，0 失败、0 错误、0 跳过**。Lint **0 错误、27 警告**；随后仅更新了设备测试夹具与测试交互并重新编译测试 APK。
+- 2.0 产品构建成功，用时 **3 分 42 秒**；**199 项 JVM 单元测试通过，0 失败、0 错误、0 跳过**。Lint **0 错误、27 警告**；随后仅更新了设备测试夹具与测试交互并重新编译测试 APK。
 - 最终设备集合为 **124 项**。API 24 全量 **124／124 通过，201.18 秒**；固定跨系统测试字图像素后，API 37 全量 **124／124 通过，145.048 秒**。API 24 和 API 35／16 KB 还分别复核固定像素后的 3 项 OCR，均通过。API 35 的 124 项各有通过记录，但全量长进程曾发生 ART 原生崩溃，不能称单进程整套通过。失败与分段复跑记录见 [验证报告](docs/verification.md)。
 - API 35 x86_64／16 KB 上，离线中文 OCR、实际图形 JNI 与主界面已运行；禁用 Google Play services、断网后 **3 项 OCR 测试通过**。这不代表 ARM64 16 KB 或无 GMS 实体手机已通过。
 - API 37 合成端到端经只读 SQL 严格核验：**10 笔正式账目、28 条来源事件、净支出 ¥106.00**；可靠同单通知与页面关联，转账／OCR／超额退款保持待确认，聊天及受保护窗口不形成候选。
@@ -72,7 +82,7 @@
 - 历史 1.1 记录为 105 项 JVM 与 API 37 模拟器 37 项设备测试，见 [1.1 验证记录](docs/verification-screen.md)。
 - 测试使用独立数据库、合成通知／付款页面与专用模拟器。夹具 `tools/notification-fixture` 不属于产品 APK，不应安装到个人手机覆盖真实支付应用。真实 S23 Ultra 和实际微信／支付宝版本仍未验证。
 
-本次本机交付包为 `deliverables/qingji-v2.0.apk`，57,543,659 字节；SHA-256 为 `4681BA82C750AA838B51DAA7CFE9D16AFD2FAC1DB80DF1AD43C268797BE2741D`。APK v2 签名与 16 KB ZIP 对齐检查通过；对应安装包与源码入口见本文顶部的发布页。
+历史 2.0 本机交付包为 `deliverables/qingji-v2.0.apk`，57,543,659 字节；SHA-256 为 `4681BA82C750AA838B51DAA7CFE9D16AFD2FAC1DB80DF1AD43C268797BE2741D`。该包 APK v2 签名与 16 KB ZIP 对齐检查通过；对应安装包与源码入口见本文顶部的历史发布页，不代表本轮 2.1 已构建或发布。
 
 主账单编辑器目前在旋转或折叠导致 Activity 重建时会关闭并丢失未保存草稿，请先保存后旋转；已保存账目不受此界面状态影响。API 30–33 的显示级截图、多窗口／副屏及厂商后台行为也需分别实测。
 

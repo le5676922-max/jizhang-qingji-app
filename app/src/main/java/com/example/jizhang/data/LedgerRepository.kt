@@ -149,8 +149,13 @@ class LedgerRepository private constructor(
                     if(success) put("last_success_at",now) else { put("last_failure_at",now);put("last_failure_reason",message) }
                 }
                 db.update("recognition_diagnostics",values,"channel=?",arrayOf(channel.name))
-                refreshEntries()
-            } }.onFailure { mutableStorageError.value="识别状态暂时无法保存，请检查设备存储空间。" }
+                // Captures may report frequently. Reading the complete financial/event history
+                // here needlessly grows each diagnostic write with the size of the ledger.
+                // A diagnostic is not a successful ledger refresh and must not dismiss its error.
+                mutableDiagnostics.value = readDiagnostics(db)
+            } }.onFailure {
+                mutableStorageError.compareAndSet(null,"识别状态暂时无法保存，请检查设备存储空间。")
+            }
         }
     }
 
@@ -799,9 +804,7 @@ class LedgerRepository private constructor(
         val loadedRules = db.query("merchant_rules",null,null,null,null,null,"updated_at DESC").use { cursor -> buildList {
             while(cursor.moveToNext()) add(MerchantCategoryRule(EntrySource.valueOf(cursor.text("provider")),cursor.text("merchant_key"),EntryType.valueOf(cursor.text("type")),cursor.text("category"),cursor.number("updated_at")))
         } }
-        val loadedDiagnostics = db.query("recognition_diagnostics",null,null,null,null,null,"channel").use { cursor -> buildList {
-            while(cursor.moveToNext()) add(RecognitionDiagnostic(cursor.text("channel"),cursor.number("last_success_at"),cursor.number("last_failure_at"),cursor.text("last_failure_reason"),cursor.number("last_duration_ms")))
-        } }
+        val loadedDiagnostics = readDiagnostics(db)
         // Read everything before publishing: a failing table cannot expose a partial refresh.
         mutableEntries.value = loadedEntries
         mutableRecognitionEvents.value = loadedEvents
@@ -810,6 +813,11 @@ class LedgerRepository private constructor(
         mutableDiagnostics.value = loadedDiagnostics
         mutableStorageError.value = null
     }
+
+    private fun readDiagnostics(db: SQLiteDatabase): List<RecognitionDiagnostic> =
+        db.query("recognition_diagnostics",null,null,null,null,null,"channel").use { cursor -> buildList {
+            while(cursor.moveToNext()) add(RecognitionDiagnostic(cursor.text("channel"),cursor.number("last_success_at"),cursor.number("last_failure_at"),cursor.text("last_failure_reason"),cursor.number("last_duration_ms")))
+        } }
 
     private fun refreshAfterCommit() {
         runCatching { refreshEntries() }.onFailure {
